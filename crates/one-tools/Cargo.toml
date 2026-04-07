@@ -1,0 +1,19 @@
+[package]
+name = "one-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Agentic tool system for One — file ops, bash, grep, etc."
+
+[dependencies]
+one-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+reqwest.workspace = true
+base64.workspace = true

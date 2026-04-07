@@ -1,0 +1,18 @@
+[package]
+name = "one-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Persistence layer for One — SQLite conversation history and config"
+
+[dependencies]
+one-core.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+rusqlite = { version = "= 0.35.0", features = ["bundled"] }
+dirs-next.workspace = true

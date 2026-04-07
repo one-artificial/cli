@@ -1,0 +1,27 @@
+[package]
+name = "one-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "One — a multi-project, multi-provider AI coding terminal"
+
+[[bin]]
+name = "one"
+path = "src/main.rs"
+
+[dependencies]
+one-core.workspace = true
+one-tui.workspace = true
+one-ai.workspace = true
+one-tools.workspace = true
+one-integrations.workspace = true
+one-db.workspace = true
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+clap_complete.workspace = true

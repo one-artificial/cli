@@ -1,0 +1,20 @@
+[package]
+name = "one-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Terminal UI for One — multi-session ratatui interface"
+
+[dependencies]
+one-core.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+fastrand.workspace = true
+pulldown-cmark.workspace = true
+serde_json.workspace = true
+dirs-next.workspace = true

@@ -1,0 +1,25 @@
+[package]
+name = "one-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Multi-provider AI client for One — Claude, OpenAI, Ollama, Gemini"
+
+[dependencies]
+one-core.workspace = true
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+futures-util.workspace = true
+uuid.workspace = true
+whoami.workspace = true
+sha2.workspace = true
+hex = "= 0.4.3"
+dirs-next.workspace = true
+fastrand.workspace = true
+chrono.workspace = true
