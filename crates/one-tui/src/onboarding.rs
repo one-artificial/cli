@@ -80,8 +80,6 @@ fn draw_logo_background(f: &mut Frame) {
     for row in 0..area.height as usize {
         let logo_row = row.checked_sub(y_offset);
         let w = area.width as usize;
-        let bg = Style::default().bg(Color::Black);
-
         if let Some(lr) = logo_row
             && lr < total_rows
         {
@@ -89,27 +87,23 @@ fn draw_logo_background(f: &mut Frame) {
             let frac = lr as f32 / total_rows as f32;
             let color = gradient_color(frac, 0.35);
 
-            // Center horizontally, pad both sides to fill full width
+            // Center horizontally
             let text_len = line_text.len();
             let left_pad = if w > text_len { (w - text_len) / 2 } else { 0 };
-            let right_pad = w.saturating_sub(left_pad + text_len);
 
             let mut spans = vec![];
             if left_pad > 0 {
-                spans.push(Span::styled(" ".repeat(left_pad), bg));
+                spans.push(Span::raw(" ".repeat(left_pad)));
             }
             spans.push(Span::styled(
                 line_text.to_string(),
-                Style::default().fg(color).bg(Color::Black),
+                Style::default().fg(color),
             ));
-            if right_pad > 0 {
-                spans.push(Span::styled(" ".repeat(right_pad), bg));
-            }
             styled_lines.push(Line::from(spans));
             continue;
         }
         // Empty row (above or below the logo)
-        styled_lines.push(Line::from(Span::styled(" ".repeat(w), bg)));
+        styled_lines.push(Line::from(""));
     }
 
     let paragraph = Paragraph::new(Text::from(styled_lines));
@@ -559,9 +553,7 @@ fn draw_api_key_dialog(f: &mut Frame, provider: Provider, key_buf: &str, cursor_
             dspan("  ", Color::White),
             Span::styled(
                 format!(" {display:<40} "),
-                Style::default()
-                    .fg(Color::White)
-                    .bg(Color::Rgb(0x1A, 0x1A, 0x24)),
+                Style::default().fg(Color::White),
             ),
         ]),
         Line::from(""),
@@ -649,29 +641,21 @@ fn draw_done(f: &mut Frame) {
 
 // ── Helpers ───────────────────────────────────────────────────────
 
-/// Dialog background color — used on the block AND every span inside it.
-const DIALOG_BG: Color = Color::Rgb(0x0A, 0x0A, 0x14);
-
-/// Build a styled span with the dialog background baked in.
+/// Build a styled span.
 fn dspan(text: impl Into<String>, fg: Color) -> Span<'static> {
-    Span::styled(text.into(), Style::default().fg(fg).bg(DIALOG_BG))
+    Span::styled(text.into(), Style::default().fg(fg))
 }
 
 /// Bold variant.
 fn dspan_bold(text: impl Into<String>, fg: Color) -> Span<'static> {
     Span::styled(
         text.into(),
-        Style::default()
-            .fg(fg)
-            .bg(DIALOG_BG)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(fg).add_modifier(Modifier::BOLD),
     )
 }
 
 fn paragraph(lines: Vec<Line<'static>>) -> Paragraph<'static> {
-    Paragraph::new(Text::from(lines))
-        .wrap(Wrap { trim: false })
-        .style(Style::default().bg(DIALOG_BG))
+    Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false })
 }
 
 fn dialog_block(title: &str) -> Block<'_> {
@@ -680,12 +664,7 @@ fn dialog_block(title: &str) -> Block<'_> {
         .border_type(ratatui::widgets::BorderType::Rounded)
         .title(title)
         .title_alignment(Alignment::Center)
-        .border_style(
-            Style::default()
-                .fg(Color::Rgb(0x33, 0xCC, 0xFF))
-                .bg(DIALOG_BG),
-        )
-        .style(Style::default().bg(DIALOG_BG))
+        .border_style(Style::default().fg(Color::Rgb(0x33, 0xCC, 0xFF)))
 }
 
 /// Create a centered dialog rectangle with fixed character dimensions.

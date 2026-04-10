@@ -1548,7 +1548,9 @@ impl App {
         let header = Paragraph::new(Line::from(vec![
             Span::styled(
                 " TRANSCRIPT ",
-                Style::default().fg(Color::Black).bg(Color::Cyan),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(format!("  showing: {show_label}"), dim),
         ]));
@@ -2439,10 +2441,7 @@ impl App {
                 let time = notif.timestamp.format("%H:%M").to_string();
 
                 result.push(Line::from(vec![
-                    Span::styled(
-                        format!(" {icon} "),
-                        Style::default().fg(Color::Black).bg(color),
-                    ),
+                    Span::styled(format!("[{icon}]"), Style::default().fg(color)),
                     Span::raw(" "),
                     Span::styled(time, Style::default().fg(Color::DarkGray)),
                     Span::raw(" "),
