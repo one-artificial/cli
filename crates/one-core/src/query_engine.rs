@@ -211,11 +211,18 @@ impl QueryEngine {
                 content: system_prompt.clone(),
             }];
 
-            // Build conversation messages from turns
+            // Build conversation messages from turns.
+            // Skip empty assistant turns — they're either stuck streaming turns
+            // from a previous failed request or tool-only turns with no prose.
             for turn in &session.conversation.turns {
                 let role = match turn.role {
                     crate::conversation::TurnRole::User => Role::User,
-                    crate::conversation::TurnRole::Assistant => Role::Assistant,
+                    crate::conversation::TurnRole::Assistant => {
+                        if turn.content.is_empty() {
+                            continue;
+                        }
+                        Role::Assistant
+                    }
                     crate::conversation::TurnRole::System
                     | crate::conversation::TurnRole::ToolResult => continue,
                 };
@@ -223,6 +230,17 @@ impl QueryEngine {
                     role,
                     content: turn.content.clone(),
                 });
+            }
+
+            // Anthropic (and most providers) require the conversation to end
+            // with a user message. Trim any trailing assistant turns that
+            // slipped through (e.g. a partial response from a prior error).
+            while msgs
+                .last()
+                .map(|m| m.role == Role::Assistant)
+                .unwrap_or(false)
+            {
+                msgs.pop();
             }
 
             msgs

@@ -133,12 +133,20 @@ fn load_skills_from_dir(dir: &Path) -> Vec<Skill> {
         return skills;
     }
 
-    collect_skills_recursive(dir, &mut skills);
+    collect_skills_recursive(dir, dir, &mut skills);
     skills
 }
 
 /// Recursively collect .md skill files from a directory tree.
-fn collect_skills_recursive(dir: &Path, skills: &mut Vec<Skill>) {
+///
+/// `root` is the top-level commands directory (e.g. `~/.claude/commands/`).
+/// `dir` is the current directory being walked.
+///
+/// Files directly under `root` get no namespace prefix (e.g. `commit.md` → `commit`).
+/// Files one level deep get the subdirectory name as a namespace prefix
+/// (e.g. `gsd/debug.md` → `gsd:debug`).
+/// Deeper nesting is ignored — only one level of namespacing is supported.
+fn collect_skills_recursive(root: &Path, dir: &Path, skills: &mut Vec<Skill>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -147,8 +155,10 @@ fn collect_skills_recursive(dir: &Path, skills: &mut Vec<Skill>) {
         let path = entry.path();
 
         if path.is_dir() {
-            // Recurse into subdirectories (supports plugin/commands/ structure)
-            collect_skills_recursive(&path, skills);
+            // Only recurse one level deep (namespace subdirs)
+            if dir == root {
+                collect_skills_recursive(root, &path, skills);
+            }
             continue;
         }
 
@@ -161,15 +171,28 @@ fn collect_skills_recursive(dir: &Path, skills: &mut Vec<Skill>) {
             continue;
         }
 
-        let name = path
+        let stem = path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
 
-        if name.is_empty() {
+        if stem.is_empty() {
             continue;
         }
+
+        // Build the namespaced name: if we're inside a subdirectory of root,
+        // prefix with the subdirectory name (e.g. "gsd:debug").
+        let name = if dir != root {
+            let namespace = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if namespace.is_empty() {
+                stem
+            } else {
+                format!("{namespace}:{stem}")
+            }
+        } else {
+            stem
+        };
 
         let Ok(content) = std::fs::read_to_string(&path) else {
             continue;
