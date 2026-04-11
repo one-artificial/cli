@@ -1,12 +1,22 @@
 use std::path::{Path, PathBuf};
 
-/// Build the system prompt by reading CLAUDE.md files from:
-/// 1. ~/.claude/CLAUDE.md (global user instructions)
-/// 2. ~/.claude/projects/<project-hash>/CLAUDE.md (project-specific)
-/// 3. <project_dir>/CLAUDE.md (repo root)
-/// 4. <project_dir>/.claude/CLAUDE.md (repo .claude dir)
+/// Build the system prompt by merging instruction files from all known AI CLI/TUI tools.
 ///
-/// Inspired by the CLAUDE.md convention for project-level AI instructions.
+/// Profile-level (global, loaded first / lowest priority):
+/// - `~/.claude/CLAUDE.md`, `~/.claude/rules/*.md`
+/// - `~/.gemini/GEMINI.md`
+/// - `~/.codex/instructions.md`
+/// - `~/.one/AGENTS.md`
+///
+/// Project-level (loaded last / highest priority):
+/// - `CLAUDE.md`, `.claude/CLAUDE.md`, `CLAUDE.local.md`, `.claude/rules/*.md`
+/// - `GEMINI.md`, `.gemini/GEMINI.md`, `.gemini/rules/*.md`
+/// - `AGENTS.md` (OpenAI Codex / agnostic standard)
+/// - `.cursorrules` (Cursor)
+/// - `.clinerules` (Cline / Roo Cline)
+/// - `codex.md`, `.codex/instructions.md` (OpenAI Codex CLI)
+///
+/// All files are optional. Later/more-specific files take precedence.
 pub fn build(project_dir: &str) -> String {
     let mut sections = Vec::new();
 
@@ -73,6 +83,59 @@ pub fn build(project_dir: &str) -> String {
 
     if !rules_content.is_empty() {
         sections.push(format!("# Rules\n\n{}", rules_content.join("\n\n---\n\n")));
+    }
+
+    // Cross-tool instruction files — platform-specific tools first (lowest priority within tier),
+    // open standards last (highest). Open standards outrank platform standards.
+    let proj = PathBuf::from(project_dir);
+
+    // Profile-level: platform tools, then open standard
+    if let Some(home) = dirs_next::home_dir() {
+        for (path, label) in [
+            (home.join(".gemini").join("GEMINI.md"), "Gemini (global)"),
+            (
+                home.join(".codex").join("instructions.md"),
+                "Codex (global)",
+            ),
+            // Open standard last — wins over platform tools above
+            (home.join(".one").join("AGENTS.md"), "AGENTS (global)"),
+        ] {
+            if let Some(content) = read_file(&path) {
+                sections.push(format!("# {label} Instructions\n\n{content}"));
+            }
+        }
+    }
+
+    // Project-level: platform-specific first, open standard (AGENTS.md) last
+    for (path, label) in [
+        (proj.join("GEMINI.md"), "Repository (GEMINI.md)"),
+        (
+            proj.join(".gemini").join("GEMINI.md"),
+            "Repository (.gemini/GEMINI.md)",
+        ),
+        (proj.join(".cursorrules"), "Repository (.cursorrules)"),
+        (proj.join(".clinerules"), "Repository (.clinerules)"),
+        (proj.join("codex.md"), "Repository (codex.md)"),
+        (
+            proj.join(".codex").join("instructions.md"),
+            "Repository (.codex/instructions.md)",
+        ),
+        // Open standard last — takes precedence over all platform-specific files above
+        (proj.join("AGENTS.md"), "Repository (AGENTS.md)"),
+    ] {
+        if let Some(content) = read_file(&path) {
+            sections.push(format!("# {label} Instructions\n\n{content}"));
+        }
+    }
+
+    // Cross-tool rules directories (platform before open)
+    let gemini_rules = proj.join(".gemini").join("rules");
+    let gemini_rule_files = read_rules_dir(&gemini_rules);
+    if !gemini_rule_files.is_empty() {
+        sections.push(format!(
+            "# Rules (.gemini/rules)\n\n{}",
+            gemini_rule_files.join("\n\n---\n\n")
+        ));
     }
 
     // Environment context

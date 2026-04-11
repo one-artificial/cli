@@ -22,13 +22,15 @@ Three distinct concepts — understanding the difference matters when answering 
 - A skill (`/commit`) loads a markdown prompt template which the model follows as instructions; the model can then call whatever tools the skill's `allowed-tools` frontmatter permits
 - Skills can be invoked by the model autonomously via the `Skill` tool when it recognises a relevant context — the system prompt lists all available skills and their descriptions
 
+**Design principle: open standards outrank platform standards.** Within each tier, platform-specific tools are loaded first (lowest priority) and One-native / open-standard paths are loaded last (highest priority). Conflicts always resolve in favour of the more-open format.
+
 **Skill loading levels** (lowest → highest priority, higher wins on name conflict):
 
-| Level | Paths |
+| Level | Order within level (last = wins) |
 |---|---|
-| Profile | `~/.one/commands/*.md` · `~/.claude/commands/*.md` |
-| Git root | `<git-root>/.one/commands/*.md` · `<git-root>/.claude/commands/*.md` (skipped if same as project) |
-| Project | `<project>/.one/commands/*.md` · `<project>/.claude/commands/*.md` |
+| Profile | `~/.gemini/commands/` → `~/.claude/commands/` → `~/.one/commands/` |
+| Git root | `<root>/.gemini/commands/` → `<root>/.claude/commands/` → `<root>/.one/commands/` |
+| Project | `.gemini/commands/` → `.claude/commands/` → `.one/commands/` |
 
 Git root is detected by walking up from the project directory until a `.git` entry is found — enabling monorepo-level skills shared across all packages. A project-level skill with the same name as a profile-level one always wins.
 
@@ -44,6 +46,18 @@ argument-hint: <branch>                               # optional
 Prompt body. $ARGUMENTS is replaced with text after the command name.
 !`git branch --show-current`  — inline shell commands replaced at invocation time.
 ```
+
+---
+
+## Design Principles
+
+**Open standards outrank platform standards.** When loading config, instructions, skills, or MCP servers from multiple sources, more-open formats always win over vendor-specific ones:
+
+- `AGENTS.md` > `CLAUDE.md` / `GEMINI.md` / `.cursorrules`
+- `.mcp.json` (MCP spec) > `claude_desktop_config.json`
+- `.one/commands/` > `.claude/commands/` > `.gemini/commands/`
+
+This means a developer's `AGENTS.md` instruction always takes precedence over any platform-specific instruction file.
 
 ---
 

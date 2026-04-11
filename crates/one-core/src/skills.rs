@@ -61,34 +61,43 @@ pub struct Skill {
 /// (project > git-root > profile).
 pub fn load_skills(project_dir: &str) -> Vec<Skill> {
     // Collect in priority order: profile first (lowest), project last (highest).
-    // Dedup keeps the last occurrence so more-specific entries win.
+    // Within each tier: platform-specific tools first, open/One-native last.
+    // Dedup keeps the last occurrence so more-specific and open-standard entries win.
+    // Priority: One > CC > Gemini (open standards outrank platform standards).
     let mut all: Vec<Skill> = Vec::new();
 
-    // 1. Profile-level
+    // 1. Profile-level — platform tools first, then One (wins)
     if let Some(home) = dirs_next::home_dir() {
-        all.extend(load_skills_from_dir(&home.join(".one").join("commands")));
+        all.extend(load_skills_from_dir(&home.join(".gemini").join("commands")));
         all.extend(load_skills_from_dir(&home.join(".claude").join("commands")));
+        all.extend(load_skills_from_dir(&home.join(".one").join("commands")));
     }
 
-    // 2. Git-root level (walk up from project_dir looking for .git)
+    // 2. Git-root level — platform tools first, then One (wins)
     let project_path = PathBuf::from(project_dir);
     if let Some(git_root) = find_git_root(&project_path)
         && git_root != project_path
     {
         all.extend(load_skills_from_dir(
-            &git_root.join(".one").join("commands"),
+            &git_root.join(".gemini").join("commands"),
         ));
         all.extend(load_skills_from_dir(
             &git_root.join(".claude").join("commands"),
         ));
+        all.extend(load_skills_from_dir(
+            &git_root.join(".one").join("commands"),
+        ));
     }
 
-    // 3. Project-level (highest priority)
+    // 3. Project-level — platform tools first, then One (wins, highest priority)
     all.extend(load_skills_from_dir(
-        &project_path.join(".one").join("commands"),
+        &project_path.join(".gemini").join("commands"),
     ));
     all.extend(load_skills_from_dir(
         &project_path.join(".claude").join("commands"),
+    ));
+    all.extend(load_skills_from_dir(
+        &project_path.join(".one").join("commands"),
     ));
 
     // Dedup: iterate in reverse so the last-added (highest-priority) occurrence wins.
