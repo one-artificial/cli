@@ -1006,9 +1006,7 @@ impl App {
                     (_, KeyCode::Enter) => {
                         if self.autocomplete.visible {
                             let current = self.input.value().to_string();
-                            if let Some(val) =
-                                self.autocomplete.accept_with_input(&current)
-                            {
+                            if let Some(val) = self.autocomplete.accept_with_input(&current) {
                                 if val == current {
                                     // Exact match — nothing to complete, submit directly
                                     self.autocomplete.visible = false;
@@ -2518,8 +2516,9 @@ impl App {
                 );
 
                 let debug_mode = snapshot.debug_mode;
-                let debug_dim =
-                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::DIM);
+                let debug_dim = Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM);
                 let mut dbg_idx = 0usize;
 
                 for turn in &session.conversation.turns {
@@ -2626,13 +2625,11 @@ impl App {
                                 const GROWING: &[&str] =
                                     &["\u{00b7}", "\u{2022}", "\u{25cf}", "\u{2022}", "\u{00b7}"];
                                 const FALLING_SAND: &[&str] = &[
-                                    "⠁", "⠂", "⠄", "⡀", "⡈", "⡐", "⡠", "⣀", "⣁", "⣂", "⣄",
-                                    "⣌", "⣔", "⣤", "⣥", "⣦", "⣮", "⣶", "⣷", "⣿", "⡿", "⠿",
-                                    "⢟", "⠟", "⡛", "⠛", "⠫", "⢋", "⠋", "⠍", "⡉", "⠉", "⠑",
-                                    "⠡", "⢁",
+                                    "⠁", "⠂", "⠄", "⡀", "⡈", "⡐", "⡠", "⣀", "⣁", "⣂", "⣄", "⣌",
+                                    "⣔", "⣤", "⣥", "⣦", "⣮", "⣶", "⣷", "⣿", "⡿", "⠿", "⢟", "⠟",
+                                    "⡛", "⠛", "⠫", "⢋", "⠋", "⠍", "⡉", "⠉", "⠑", "⠡", "⢁",
                                 ];
-                                const FOLD: &[&str] =
-                                    &["-", "≻", "›", "⟩", "|", "⟨", "‹", "≺"];
+                                const FOLD: &[&str] = &["-", "≻", "›", "⟩", "|", "⟨", "‹", "≺"];
                                 const BOX_BOUNCE: &[&str] = &["▖", "▘", "▝", "▗"];
                                 const BRAILLE: &[&str] =
                                     &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -2792,15 +2789,13 @@ impl App {
                     const GROWING: &[&str] =
                         &["\u{00b7}", "\u{2022}", "\u{25cf}", "\u{2022}", "\u{00b7}"];
                     const FALLING_SAND: &[&str] = &[
-                        "⠁", "⠂", "⠄", "⡀", "⡈", "⡐", "⡠", "⣀", "⣁", "⣂", "⣄",
-                        "⣌", "⣔", "⣤", "⣥", "⣦", "⣮", "⣶", "⣷", "⣿", "⡿", "⠿",
-                        "⢟", "⠟", "⡛", "⠛", "⠫", "⢋", "⠋", "⠍", "⡉", "⠉", "⠑",
-                        "⠡", "⢁",
+                        "⠁", "⠂", "⠄", "⡀", "⡈", "⡐", "⡠", "⣀", "⣁", "⣂", "⣄", "⣌", "⣔", "⣤", "⣥",
+                        "⣦", "⣮", "⣶", "⣷", "⣿", "⡿", "⠿", "⢟", "⠟", "⡛", "⠛", "⠫", "⢋", "⠋", "⠍",
+                        "⡉", "⠉", "⠑", "⠡", "⢁",
                     ];
                     const FOLD: &[&str] = &["-", "≻", "›", "⟩", "|", "⟨", "‹", "≺"];
                     const BOX_BOUNCE: &[&str] = &["▖", "▘", "▝", "▗"];
-                    const BRAILLE: &[&str] =
-                        &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                    const BRAILLE: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
                     let frames: &[&str] = match self.processing_dot_style % 5 {
                         0 => GROWING,
                         1 => FALLING_SAND,
@@ -2847,10 +2842,7 @@ impl App {
                             ),
                         ]));
                         result.push(Line::from(vec![
-                            Span::styled(
-                                "  \u{23bf}  ",
-                                Style::default().fg(Color::DarkGray),
-                            ),
+                            Span::styled("  \u{23bf}  ", Style::default().fg(Color::DarkGray)),
                             Span::styled(
                                 format!("Tip: {tip}"),
                                 Style::default().fg(Color::DarkGray),

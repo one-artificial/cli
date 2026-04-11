@@ -296,7 +296,10 @@ impl QueryEngine {
                 request_config.max_tokens,
             ) {
                 tracing::info!("Auto-compacting conversation (token limit approaching)");
-                self.debug(&session_id_owned, "auto-compact → token limit approaching, summarising");
+                self.debug(
+                    &session_id_owned,
+                    "auto-compact → token limit approaching, summarising",
+                );
                 if let Some(result) = crate::compact::auto_compact::auto_compact_if_needed(
                     &current_messages,
                     &self.provider,

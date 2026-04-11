@@ -271,10 +271,7 @@ impl Autocomplete {
                     format!(" {icon} {name_display}{suffix}")
                 };
                 Line::from(vec![
-                    Span::styled(
-                        entry,
-                        Style::default().fg(fg).bg(bg).add_modifier(modifier),
-                    ),
+                    Span::styled(entry, Style::default().fg(fg).bg(bg).add_modifier(modifier)),
                     Span::styled(
                         if s.description.is_empty() {
                             String::new()
