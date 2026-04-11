@@ -360,12 +360,12 @@ mod tests {
         };
 
         // Should match "Edit"
-        let results = execute_hooks(&[hook.clone()], Some("Edit"), None, "/tmp").await;
+        let results = execute_hooks(std::slice::from_ref(&hook), Some("Edit"), None, "/tmp").await;
         assert_eq!(results.len(), 1);
         assert!(!results[0].1); // not an error
 
         // Should match "Write"
-        let results = execute_hooks(&[hook.clone()], Some("Write"), None, "/tmp").await;
+        let results = execute_hooks(std::slice::from_ref(&hook), Some("Write"), None, "/tmp").await;
         assert_eq!(results.len(), 1);
 
         // Should NOT match "Bash"

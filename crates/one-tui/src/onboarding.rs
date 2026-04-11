@@ -272,17 +272,16 @@ impl Provider {
     }
 
     fn needs_api_key(&self) -> bool {
-        matches!(self, Provider::Anthropic | Provider::OpenAi | Provider::Google)
+        matches!(
+            self,
+            Provider::Anthropic | Provider::OpenAi | Provider::Google
+        )
     }
 
     /// Check whether an API key already exists in the environment.
     fn has_env_key(&self) -> bool {
         let var = self.env_var();
-        !var.is_empty()
-            && std::env::var(var)
-                .ok()
-                .filter(|v| !v.is_empty())
-                .is_some()
+        !var.is_empty() && std::env::var(var).ok().filter(|v| !v.is_empty()).is_some()
     }
 
     /// Check whether a provider is configured (has an API key or is local).
@@ -291,12 +290,8 @@ impl Provider {
             Provider::Anthropic => {
                 self.has_env_key() || config.provider.anthropic.api_key.is_some()
             }
-            Provider::OpenAi => {
-                self.has_env_key() || config.provider.openai.api_key.is_some()
-            }
-            Provider::Google => {
-                self.has_env_key() || config.provider.google.api_key.is_some()
-            }
+            Provider::OpenAi => self.has_env_key() || config.provider.openai.api_key.is_some(),
+            Provider::Google => self.has_env_key() || config.provider.google.api_key.is_some(),
             Provider::Ollama => true, // Local, always available
             Provider::Skip => true,   // Skip doesn't need configuration
         }
@@ -361,13 +356,28 @@ async fn onboarding_loop(
         // Live theme preview: on the theme step use the hovered option's palette so
         // the whole screen visibly shifts as the user navigates; after selection use
         // the confirmed choice so subsequent steps match what was picked.
-        let preview_idx = if step_snap == Step::ThemeSelect { idx_snap } else { confirmed_theme_idx };
+        let preview_idx = if step_snap == Step::ThemeSelect {
+            idx_snap
+        } else {
+            confirmed_theme_idx
+        };
         let bg_snap = THEME_OPTIONS[preview_idx].bg;
         let fg_snap = THEME_OPTIONS[preview_idx].fg;
         let accent_snap = THEME_OPTIONS[preview_idx].accent;
 
         terminal.draw(|f| {
-            draw_screen(f, step_snap, idx_snap, syntax_snap, prov_snap, &key_snap, blink, bg_snap, fg_snap, accent_snap);
+            draw_screen(
+                f,
+                step_snap,
+                idx_snap,
+                syntax_snap,
+                prov_snap,
+                &key_snap,
+                blink,
+                bg_snap,
+                fg_snap,
+                accent_snap,
+            );
         })?;
 
         if step == Step::Done {
@@ -406,7 +416,8 @@ async fn onboarding_loop(
                     KeyCode::Enter => {
                         let opt = &THEME_OPTIONS[selected_idx];
                         config.ui.theme = opt.config_name.to_string();
-                        config.ui.colors = one_core::config::ThemeColors::for_theme(opt.config_name);
+                        config.ui.colors =
+                            one_core::config::ThemeColors::for_theme(opt.config_name);
                         config.ui.syntax_theme =
                             SYNTAX_THEMES[selected_syntax_idx].config_name.to_string();
                         confirmed_theme_idx = selected_idx;
@@ -480,11 +491,11 @@ async fn onboarding_loop(
                         if selected_idx == all.len() {
                             // "Continue →" — advance, picking first configured as default
                             let first = all.iter().find(|p| p.is_configured(config));
-                            if let Some(p) = first {
-                                if config.provider.default_provider.is_empty() {
-                                    config.provider.default_provider = p.config_name().to_string();
-                                    config.provider.default_model = p.default_model().to_string();
-                                }
+                            if let Some(p) = first
+                                && config.provider.default_provider.is_empty()
+                            {
+                                config.provider.default_provider = p.config_name().to_string();
+                                config.provider.default_model = p.default_model().to_string();
                             }
                             step = Step::SecurityNote;
                         } else {
@@ -566,6 +577,7 @@ async fn onboarding_loop(
 
 // ── Screen layout ────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn draw_screen(
     f: &mut Frame,
     step: Step,
@@ -600,7 +612,7 @@ fn draw_screen(
                 Constraint::Length(1),          // top separator
                 Constraint::Length(artscape_h), // artscape
                 Constraint::Length(1),          // bottom separator
-                Constraint::Min(0),            // content
+                Constraint::Min(0),             // content
             ])
             .split(area);
 
@@ -608,20 +620,40 @@ fn draw_screen(
         draw_separator(f, chunks[1], width, accent);
         draw_artscape(f, chunks[2], width);
         draw_separator(f, chunks[3], width, accent);
-        draw_content(f, chunks[4], step, selected_idx, selected_syntax_idx, provider, key_buf, cursor_blink, fg);
+        draw_content(
+            f,
+            chunks[4],
+            step,
+            selected_idx,
+            selected_syntax_idx,
+            provider,
+            key_buf,
+            cursor_blink,
+            fg,
+        );
     } else {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1), // header
                 Constraint::Length(1), // separator
-                Constraint::Min(0),   // content
+                Constraint::Min(0),    // content
             ])
             .split(area);
 
         draw_header(f, chunks[0], accent);
         draw_separator(f, chunks[1], width, accent);
-        draw_content(f, chunks[2], step, selected_idx, selected_syntax_idx, provider, key_buf, cursor_blink, fg);
+        draw_content(
+            f,
+            chunks[2],
+            step,
+            selected_idx,
+            selected_syntax_idx,
+            provider,
+            key_buf,
+            cursor_blink,
+            fg,
+        );
     }
 }
 
@@ -664,13 +696,11 @@ fn draw_artscape(f: &mut Frame, area: Rect, term_width: usize) {
 }
 
 fn draw_separator(f: &mut Frame, area: Rect, width: usize, color: Color) {
-    let sep = Paragraph::new(Line::from(dspan(
-        "\u{2026}".repeat(width),
-        color,
-    )));
+    let sep = Paragraph::new(Line::from(dspan("\u{2026}".repeat(width), color)));
     f.render_widget(sep, area);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_content(
     f: &mut Frame,
     area: Rect,
@@ -695,7 +725,11 @@ fn draw_content(
 
 // ── Content builders ─────────────────────────────────────────────
 
-fn theme_select_lines(selected_theme_idx: usize, selected_syntax_idx: usize, fg: Color) -> Vec<Line<'static>> {
+fn theme_select_lines(
+    selected_theme_idx: usize,
+    selected_syntax_idx: usize,
+    fg: Color,
+) -> Vec<Line<'static>> {
     let theme_opt = &THEME_OPTIONS[selected_theme_idx];
     let syntax_opt = &SYNTAX_THEMES[selected_syntax_idx];
 
@@ -883,7 +917,11 @@ fn provider_select_lines(selected_idx: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn api_key_input_lines(provider: Provider, key_buf: &str, cursor_blink: bool) -> Vec<Line<'static>> {
+fn api_key_input_lines(
+    provider: Provider,
+    key_buf: &str,
+    cursor_blink: bool,
+) -> Vec<Line<'static>> {
     // Masked key display: show prefix chars, mask the rest, blinking block cursor
     let display = if key_buf.is_empty() {
         if cursor_blink { "\u{2588}" } else { " " }.to_string()
@@ -971,10 +1009,7 @@ fn security_note_lines() -> Vec<Line<'static>> {
             Color::Cyan,
         )),
         Line::from(""),
-        Line::from(dspan_bold(
-            " Press Enter to continue\u{2026}",
-            Color::Green,
-        )),
+        Line::from(dspan_bold(" Press Enter to continue\u{2026}", Color::Green)),
     ]
 }
 

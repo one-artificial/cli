@@ -1,13 +1,14 @@
 use anyhow::Result;
+use once_cell::sync::Lazy;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use once_cell::sync::Lazy;
 
 const SERVICE_NAME: &str = "one-cli";
 
 /// In-memory cache of keychain credentials to avoid repeated system keychain prompts.
 /// Once a credential is read from the keychain, it's cached for the session.
-static CREDENTIAL_CACHE: Lazy<Mutex<HashMap<String, Option<String>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static CREDENTIAL_CACHE: Lazy<Mutex<HashMap<String, Option<String>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 pub struct CredentialStore;
 
@@ -24,10 +25,10 @@ impl CredentialStore {
 
     pub fn get(provider: &str) -> Result<Option<String>> {
         // Check cache first
-        if let Ok(cache) = CREDENTIAL_CACHE.lock() {
-            if let Some(cached) = cache.get(provider) {
-                return Ok(cached.clone());
-            }
+        if let Ok(cache) = CREDENTIAL_CACHE.lock()
+            && let Some(cached) = cache.get(provider)
+        {
+            return Ok(cached.clone());
         }
 
         // Cache miss: read from keychain
@@ -39,10 +40,10 @@ impl CredentialStore {
         };
 
         // Cache the result (including None)
-        if let Ok(result_ref) = &result {
-            if let Ok(mut cache) = CREDENTIAL_CACHE.lock() {
-                cache.insert(provider.to_string(), result_ref.clone());
-            }
+        if let Ok(result_ref) = &result
+            && let Ok(mut cache) = CREDENTIAL_CACHE.lock()
+        {
+            cache.insert(provider.to_string(), result_ref.clone());
         }
 
         result

@@ -1523,7 +1523,6 @@ name = "one-db"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "dirs-next",
  "one-core",
  "rusqlite",
@@ -1532,7 +1531,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -1558,7 +1556,6 @@ dependencies = [
  "anyhow",
  "base64",
  "one-core",
- "one-db",
  "reqwest",
  "serde",
  "serde_json",
@@ -1578,7 +1575,6 @@ dependencies = [
  "dirs-next",
  "fastrand",
  "one-core",
- "one-db",
  "pulldown-cmark",
  "ratatui",
  "serde_json",
