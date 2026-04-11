@@ -6,6 +6,47 @@ You are running inside **One** — a multi-project, multi-provider AI coding ter
 
 ---
 
+## Commands, Tools, and Skills
+
+Three distinct concepts — understanding the difference matters when answering "how do I do X":
+
+| Concept | Who runs it | How | Examples |
+|---|---|---|---|
+| **Commands** | The **user** | Typed with `/` prefix in the input box | `/debug`, `/compact`, `/model opus`, `/plan` |
+| **Tools** | The **model** | Autonomously called during a response turn | `Bash`, `Read`, `Edit`, `Glob`, `Grep`, `Agent` |
+| **Skills** | The **model** (or user via `/skill-name`) | Loaded on demand — injects a prompt into the conversation as extra context | `/one-guide`, `/commit`, `/pr`, any `.md` in `commands/` |
+
+**How they interact:**
+- A command (`/compact`) triggers TUI logic that may update state and display a result
+- A tool (`Bash`) is called by the model, permission-checked, executed via `ToolExecutor`, and results are fed back into the next message turn
+- A skill (`/commit`) loads a markdown prompt template which the model follows as instructions; the model can then call whatever tools the skill's `allowed-tools` frontmatter permits
+- Skills can be invoked by the model autonomously via the `Skill` tool when it recognises a relevant context — the system prompt lists all available skills and their descriptions
+
+**Skill loading levels** (lowest → highest priority, higher wins on name conflict):
+
+| Level | Paths |
+|---|---|
+| Profile | `~/.one/commands/*.md` · `~/.claude/commands/*.md` |
+| Git root | `<git-root>/.one/commands/*.md` · `<git-root>/.claude/commands/*.md` (skipped if same as project) |
+| Project | `<project>/.one/commands/*.md` · `<project>/.claude/commands/*.md` |
+
+Git root is detected by walking up from the project directory until a `.git` entry is found — enabling monorepo-level skills shared across all packages. A project-level skill with the same name as a profile-level one always wins.
+
+**Skill file format:**
+
+```markdown
+---
+description: Shown in autocomplete and system prompt — controls when model auto-invokes
+allowed-tools: Bash(git add:*), Bash(git commit:*)   # optional
+argument-hint: <branch>                               # optional
+---
+
+Prompt body. $ARGUMENTS is replaced with text after the command name.
+!`git branch --show-current`  — inline shell commands replaced at invocation time.
+```
+
+---
+
 ## Architecture Overview
 
 ```
@@ -116,22 +157,39 @@ Returns `Resolved(ResolvedParams)`, `Degraded { requested, actual, reason }`, or
 
 ## Interleaved Reasoning / Thinking
 
-**Current state:** Thinking tokens from the AI are **invisible to One's TUI**. In `one-ai/src/anthropic.rs`, the SSE stream parser detects `"type": "thinking"` content blocks and consumes them silently — they never reach the `on_chunk` callback. Only text blocks are forwarded.
+**Goal: provider-agnostic reasoning events.** The ambition is that regardless of whether the model natively supports thinking (Anthropic extended thinking, OpenAI o-series, Gemini 2.5+, DeepSeek R1), or has no built-in reasoning API, One should surface equivalent reasoning signals through a combination of **native API**, **prompting**, **abstraction**, and **instrumentation**.
 
-**What the user sees instead:** The spinning verb status line (`⠹ Skedaddling…`) activates from the pre-stream empty chunk and persists throughout. The user can see that the model is working without seeing the raw reasoning.
+**Current state:** Thinking tokens are **invisible to the TUI**. The Anthropic provider consumes `"type": "thinking"` SSE blocks silently — they never reach `on_chunk`. Only text blocks are forwarded. The spinning verb (`⠹ Skedaddling…`) activates from the pre-stream empty chunk, so users see that the model is working but can't see the raw reasoning.
 
-**If we build our own interleaved reasoning:**
-- Thinking deltas would need a new event type (e.g., `ThinkingChunk { session_id, content }`) or a flag on `AiResponseChunk`
-- `Session` would need a `thinking_buffer: String` field
-- The TUI could show thinking in the transcript mode (`Ctrl+O`) but collapse it in the main view
-- The status line already has a "thought for Xs" display slot (not yet wired) — `stream_started` captures when first text arrives, and a `processing_started` timer could capture when the turn opened
-- The `AiResponse` struct would need a `thinking: Option<String>` field to persist reasoning for `/history`
-- Evergreen would need to decide whether to compress thinking blocks separately from text
+**How reasoning surfaces per provider type:**
 
-**Extended thinking request format (Anthropic):**
+| Provider type | Mechanism | Current One handling |
+|---|---|---|
+| Anthropic (native thinking) | `budget_tokens` in request; thinking SSE blocks in stream | Consumed silently; only text forwarded |
+| OpenAI o-series | `reasoning_effort` enum; reasoning is opaque | Opaque — status line only |
+| Gemini 2.5+ | `thinkingBudget` integer | Opaque — status line only |
+| Internal thinkers (Qwen3, DeepSeek R1) | No API param; model reasons internally | Opaque — status line only |
+| Non-thinking models via prompting | XML scratchpad in prompt (`<thinking>…</thinking>`) | Can be detected and stripped from final output |
+
+**Normalisation strategy (three paths):**
+
+1. **Native API** — use `budget_tokens` / `reasoning_effort` / `thinkingBudget` where supported; emit a `ThinkingChunk` event for each delta rather than consuming silently
+2. **Prompting** — for models without native support, inject a `<thinking>…</thinking>` XML scratchpad instruction into the system prompt. Detect the opening tag in the stream and emit `ThinkingChunk` events; strip it before the final turn content
+3. **Instrumentation** — for fully opaque models (o-series, internal thinkers), estimate thinking time from the gap between pre-stream empty chunk and first text delta; surface as "thought for Xs" in the status line
+
+**Implementation additions needed:**
+- `Event::ThinkingChunk { session_id, content }` — or a `thinking: bool` flag on `AiResponseChunk`
+- `Session.thinking_buffer: String` — accumulates thinking content for the current turn
+- TUI: show thinking collapsed in main view, expanded in transcript mode (`Ctrl+O`)
+- `AiResponse.thinking: Option<String>` — persist reasoning for `/history`
+- Status line "thought for Xs" slot — `processing_started` timer set when the empty pre-stream chunk fires, cleared when first text delta arrives
+- Evergreen: decide whether to compress/archive thinking blocks separately from text
+
+**Extended thinking request (Anthropic, current):**
 ```rust
-// In anthropic.rs, sent when budget_tokens > 0:
+// anthropic.rs — sent when budget_tokens > 0:
 body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+// In stream: "type": "thinking" blocks consumed silently, only text forwarded
 ```
 
 ---

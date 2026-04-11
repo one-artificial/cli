@@ -50,33 +50,68 @@ pub struct Skill {
     pub argument_hint: Option<String>,
 }
 
-/// Load all custom skills from user and project directories.
+/// Load all custom skills, searched in priority order (highest priority last, wins on conflict):
+///
+/// 1. Profile — `~/.one/commands/` and `~/.claude/commands/`
+/// 2. Git root — `<git-root>/.one/commands/` and `<git-root>/.claude/commands/`
+///    (skipped when git root == project_dir; enables monorepo shared skills)
+/// 3. Project — `<project_dir>/.one/commands/` and `<project_dir>/.claude/commands/`
+///
+/// When the same skill name appears at multiple levels, the more specific level wins
+/// (project > git-root > profile).
 pub fn load_skills(project_dir: &str) -> Vec<Skill> {
-    let mut skills = Vec::new();
+    // Collect in priority order: profile first (lowest), project last (highest).
+    // Dedup keeps the last occurrence so more-specific entries win.
+    let mut all: Vec<Skill> = Vec::new();
 
-    // 1. User-level: ~/.one/commands/
+    // 1. Profile-level
     if let Some(home) = dirs_next::home_dir() {
-        let user_dir = home.join(".one").join("commands");
-        skills.extend(load_skills_from_dir(&user_dir));
-
-        // Also check ~/.claude/commands/ for CC compatibility
-        let cc_dir = home.join(".claude").join("commands");
-        skills.extend(load_skills_from_dir(&cc_dir));
+        all.extend(load_skills_from_dir(&home.join(".one").join("commands")));
+        all.extend(load_skills_from_dir(&home.join(".claude").join("commands")));
     }
 
-    // 2. Project-level: .one/commands/
-    let project_one = PathBuf::from(project_dir).join(".one").join("commands");
-    skills.extend(load_skills_from_dir(&project_one));
+    // 2. Git-root level (walk up from project_dir looking for .git)
+    let project_path = PathBuf::from(project_dir);
+    if let Some(git_root) = find_git_root(&project_path)
+        && git_root != project_path
+    {
+        all.extend(load_skills_from_dir(
+            &git_root.join(".one").join("commands"),
+        ));
+        all.extend(load_skills_from_dir(
+            &git_root.join(".claude").join("commands"),
+        ));
+    }
 
-    // 3. CC-compatible: .claude/commands/
-    let project_cc = PathBuf::from(project_dir).join(".claude").join("commands");
-    skills.extend(load_skills_from_dir(&project_cc));
+    // 3. Project-level (highest priority)
+    all.extend(load_skills_from_dir(
+        &project_path.join(".one").join("commands"),
+    ));
+    all.extend(load_skills_from_dir(
+        &project_path.join(".claude").join("commands"),
+    ));
 
-    // Deduplicate by name (project overrides user)
+    // Dedup: iterate in reverse so the last-added (highest-priority) occurrence wins.
     let mut seen = std::collections::HashSet::new();
-    skills.retain(|s| seen.insert(s.name.clone()));
+    all.reverse();
+    all.retain(|s| seen.insert(s.name.clone()));
+    all.reverse();
 
-    skills
+    all
+}
+
+/// Walk up from `start` to find the nearest directory containing `.git`.
+/// Returns `None` if no git repository is found before the filesystem root.
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
 }
 
 /// Load skills from a directory, including subdirectories.
