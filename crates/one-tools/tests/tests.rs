@@ -25,7 +25,9 @@ fn test_registry_has_all_tools() {
     assert!(names.contains(&"cron_list"));
     assert!(names.contains(&"notebook_edit"));
     assert!(names.contains(&"Skill"));
-    assert_eq!(names.len(), 24);
+    assert!(names.contains(&"recall_detail"));
+    assert!(names.contains(&"OneMd"));
+    assert_eq!(names.len(), 26);
 }
 
 #[test]
@@ -33,7 +35,7 @@ fn test_registry_schemas() {
     let reg = create_default_registry();
     let schemas = reg.schemas();
 
-    assert_eq!(schemas.len(), 24);
+    assert_eq!(schemas.len(), 26);
 
     for schema in &schemas {
         assert!(schema["name"].is_string());
@@ -159,7 +161,8 @@ fn test_deferred_tools() {
 
     // Deferred names list
     let deferred = reg.deferred_tool_names();
-    assert_eq!(deferred.len(), 13);
+    assert_eq!(deferred.len(), 14);
+    assert!(deferred.contains(&"recall_detail"));
     assert!(deferred.contains(&"web_fetch"));
     assert!(deferred.contains(&"web_search"));
     assert!(deferred.contains(&"sleep"));
@@ -177,7 +180,7 @@ fn test_active_schemas_exclude_deferred() {
     let active = reg.active_schemas();
 
     // Active should exclude deferred tools
-    assert_eq!(active.len(), all.len() - 13);
+    assert_eq!(active.len(), all.len() - 14);
 
     let active_names: Vec<&str> = active.iter().map(|s| s["name"].as_str().unwrap()).collect();
 

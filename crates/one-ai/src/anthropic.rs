@@ -90,9 +90,11 @@ impl AnthropicProvider {
             "stream": true,
         });
 
-        // Thinking: enabled with budget for models that support it
-        let budget = config.max_tokens.saturating_sub(1);
-        if budget > 0 {
+        // Thinking: enabled only when the query engine explicitly allocates a budget.
+        // budget_tokens=None means thinking is off for this request (low effort / simple query).
+        if let Some(budget) = config.budget_tokens
+            && budget > 0
+        {
             body["thinking"] = serde_json::json!({
                 "type": "enabled",
                 "budget_tokens": budget

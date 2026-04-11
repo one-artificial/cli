@@ -37,6 +37,18 @@ impl TabManager {
             .and_then(|t| t.session_id.as_deref())
     }
 
+    /// Update the display title for a session tab (e.g. after deriving a name
+    /// from the first AI response).
+    pub fn set_title(&mut self, session_id: &str, name: String) {
+        if let Some(tab) = self
+            .tabs
+            .iter_mut()
+            .find(|t| t.session_id.as_deref() == Some(session_id))
+        {
+            tab.title = name;
+        }
+    }
+
     pub fn add_session(&mut self, name: String, session_id: String) {
         // Guard against duplicate tabs for the same session
         if self

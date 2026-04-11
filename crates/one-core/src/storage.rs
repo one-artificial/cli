@@ -12,6 +12,8 @@ pub enum StorageBackend {
     ClaudeCode { jsonl_path: PathBuf },
     /// Codex: TBD — will add when we discover the format
     Codex { session_path: PathBuf },
+    /// Gemini CLI: ~/.gemini/tmp/{session-id}/checkpoint.json
+    Gemini { checkpoint_path: PathBuf },
     /// One native: ~/.one/one.db (SQLite)
     Native,
 }
@@ -29,6 +31,13 @@ impl StorageBackend {
             return Self::Codex { session_path: path };
         }
 
+        // Check Gemini sessions
+        if let Some(path) = find_gemini_session(session_id) {
+            return Self::Gemini {
+                checkpoint_path: path,
+            };
+        }
+
         // Default to native
         Self::Native
     }
@@ -38,6 +47,7 @@ impl StorageBackend {
         match self {
             Self::ClaudeCode { jsonl_path } => load_claude_code_session(jsonl_path),
             Self::Codex { session_path } => load_codex_session(session_path),
+            Self::Gemini { checkpoint_path } => load_gemini_session(checkpoint_path),
             Self::Native => Ok(Conversation::default()), // Loaded via DB elsewhere
         }
     }
@@ -47,7 +57,8 @@ impl StorageBackend {
         match self {
             Self::ClaudeCode { jsonl_path } => append_claude_code_turn(jsonl_path, turn),
             Self::Codex { session_path } => append_codex_turn(session_path, turn),
-            Self::Native => Ok(()), // Handled by DB persistence task
+            Self::Gemini { .. } => Ok(()), // Gemini is read-only import source
+            Self::Native => Ok(()),        // Handled by DB persistence task
         }
     }
 }
@@ -524,6 +535,161 @@ pub fn list_codex_sessions() -> Result<Vec<SessionInfo>> {
         .collect();
 
     Ok(sessions)
+}
+
+// --- Gemini CLI backend ---
+// Gemini CLI stores checkpoints at ~/.gemini/tmp/{session-id}/checkpoint.json
+// Format: {"history": [{"role": "user"|"model", "parts": [{"text": "..."}]}, ...]}
+
+fn gemini_tmp_dir() -> PathBuf {
+    dirs_next::home_dir()
+        .unwrap_or_default()
+        .join(".gemini")
+        .join("tmp")
+}
+
+fn find_gemini_session(session_id: &str) -> Option<PathBuf> {
+    let checkpoint = gemini_tmp_dir().join(session_id).join("checkpoint.json");
+    if checkpoint.exists() {
+        Some(checkpoint)
+    } else {
+        None
+    }
+}
+
+/// List Gemini CLI sessions from ~/.gemini/tmp/
+pub fn list_gemini_sessions() -> Result<Vec<SessionInfo>> {
+    let tmp_dir = gemini_tmp_dir();
+    if !tmp_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut sessions = Vec::new();
+
+    for entry in std::fs::read_dir(&tmp_dir)?.flatten() {
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+
+        let session_id = entry.file_name().to_string_lossy().to_string();
+        let checkpoint = entry.path().join("checkpoint.json");
+        if !checkpoint.exists() {
+            continue;
+        }
+
+        if let Ok(conv) = load_gemini_session(&checkpoint) {
+            if conv.turns.is_empty() {
+                continue;
+            }
+            let first_msg = conv
+                .turns
+                .iter()
+                .find(|t| t.role == TurnRole::User)
+                .map(|t| {
+                    if t.content.len() > 80 {
+                        format!("{}...", &t.content[..80])
+                    } else {
+                        t.content.clone()
+                    }
+                })
+                .unwrap_or_default();
+
+            let timestamp = conv
+                .turns
+                .first()
+                .map(|t| t.timestamp.to_rfc3339())
+                .unwrap_or_default();
+
+            sessions.push(SessionInfo {
+                session_id,
+                project_path: String::new(),
+                backend: "Gemini".to_string(),
+                turns: conv.turns.len(),
+                first_message: first_msg,
+                timestamp,
+            });
+        }
+    }
+
+    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Ok(sessions)
+}
+
+/// Parse a Gemini CLI checkpoint.json.
+/// Handles `{"history": [...]}` and `{"messages": [...]}` top-level keys.
+/// Each entry: `{"role": "user"|"model", "parts": [{"text": "..."}]}`
+fn load_gemini_session(path: &Path) -> Result<Conversation> {
+    let content = std::fs::read_to_string(path)?;
+    let json: serde_json::Value = serde_json::from_str(&content)?;
+
+    let mut conversation = Conversation::default();
+
+    let turns = json["history"]
+        .as_array()
+        .or_else(|| json["messages"].as_array())
+        .or_else(|| json["conversation"].as_array());
+
+    let Some(turns) = turns else {
+        return Ok(conversation);
+    };
+
+    for turn in turns {
+        let role_str = turn["role"].as_str().unwrap_or("");
+        let role = match role_str {
+            "user" => TurnRole::User,
+            "model" | "assistant" => TurnRole::Assistant,
+            _ => continue,
+        };
+
+        // Parts array: [{text: "..."}] — Gemini's native format
+        let text = if let Some(parts) = turn["parts"].as_array() {
+            parts
+                .iter()
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else if let Some(t) = turn["content"].as_str() {
+            t.to_string()
+        } else {
+            continue;
+        };
+
+        if text.is_empty() {
+            continue;
+        }
+
+        conversation.turns.push(ConversationTurn {
+            role,
+            content: text,
+            timestamp: chrono::Utc::now(),
+            tool_calls: Vec::new(),
+            is_streaming: false,
+            tokens_used: None,
+        });
+    }
+
+    Ok(conversation)
+}
+
+// --- Unified import listing ---
+
+/// List importable sessions from all supported backends (Claude Code, Codex, Gemini),
+/// sorted newest-first. Failures from individual backends are silently ignored.
+pub fn list_all_importable_sessions() -> Result<Vec<SessionInfo>> {
+    let mut all = Vec::new();
+
+    if let Ok(sessions) = list_claude_code_sessions() {
+        all.extend(sessions);
+    }
+    if let Ok(sessions) = list_codex_sessions() {
+        all.extend(sessions);
+    }
+    if let Ok(sessions) = list_gemini_sessions() {
+        all.extend(sessions);
+    }
+
+    all.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    Ok(all)
 }
 
 // --- Session listing ---

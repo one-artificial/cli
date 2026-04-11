@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::conversation::Conversation;
 use crate::provider::ModelConfig;
 
@@ -22,6 +24,15 @@ pub struct Session {
     pub effort: Option<String>,
     /// Current working directory — starts as project_path, updated by cd commands.
     pub cwd: String,
+    /// Path to this session's SQLite database file (`~/.one/{project}/{session}/session.db`).
+    /// Empty until wired up by `with_storage_info()`.
+    pub db_path: PathBuf,
+    /// 6-char lowercase hex identifier — printed on exit, used with `--session <hash>`.
+    /// Empty until wired up by `with_storage_info()`.
+    pub session_hash: String,
+    /// Git branch active when this session was created.
+    /// Empty until wired up by `with_storage_info()`.
+    pub branch: String,
 }
 
 impl Session {
@@ -46,7 +57,24 @@ impl Session {
             active_tool: None,
             effort: None,
             cwd,
+            db_path: PathBuf::new(),
+            session_hash: String::new(),
+            branch: String::new(),
         }
+    }
+
+    /// Attach filesystem storage info produced by `StoragePaths` (in `one-db`).
+    /// Kept as plain-value args to avoid a `one-core → one-db` circular dependency.
+    pub fn with_storage_info(
+        mut self,
+        db_path: PathBuf,
+        session_hash: String,
+        branch: String,
+    ) -> Self {
+        self.db_path = db_path;
+        self.session_hash = session_hash;
+        self.branch = branch;
+        self
     }
 
     /// Record token usage from an API response and estimate cost.

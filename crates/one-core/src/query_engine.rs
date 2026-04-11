@@ -8,7 +8,10 @@ use crate::agent::{AgentRegistry, AgentRole};
 use crate::event::Event;
 use crate::mcp::client::McpManager;
 use crate::permissions::{PermissionBehavior, PermissionEngine, PermissionMode};
-use crate::provider::{AiProvider, Message, ModelConfig, Role};
+use crate::provider::{
+    AiProvider, Message, MessageComplexity, ModelConfig, Role, estimate_message_complexity,
+    model_capabilities, resolve_effort,
+};
 use crate::state::SharedState;
 
 /// Type alias for tool executor functions passed in from outside.
@@ -224,6 +227,30 @@ impl QueryEngine {
         let event_tx = self.event_tx.clone();
         let state_clone = self.state.clone();
 
+        // Resolve effort once for this whole request cycle.
+        // Reads session.effort, model capabilities, and message complexity to produce
+        // concrete budget_tokens + max_tokens. min_ctx_pct is 0.0 until Evergreen is live.
+        let request_config = {
+            let state = self.state.read().await;
+            let effort = state
+                .sessions
+                .get(session_id)
+                .and_then(|s| s.effort.as_deref());
+            let caps = model_capabilities(&self.model_config.model);
+            let complexity = estimate_message_complexity(content);
+            let resolved = resolve_effort(effort, &caps, 0.0, complexity);
+            tracing::debug!(
+                "Effort resolved: {} (budget_tokens={}, max_tokens={})",
+                resolved.label,
+                resolved.budget_tokens,
+                resolved.max_tokens,
+            );
+            let mut config = self.model_config.clone();
+            config.max_tokens = resolved.max_tokens;
+            config.budget_tokens = (resolved.budget_tokens > 0).then_some(resolved.budget_tokens);
+            config
+        };
+
         // Tool execution loop: stream response, execute tools, feed results back.
         // No hard turn limit by default (matches CC). Guard against infinite loops
         // with a generous upper bound.
@@ -252,17 +279,18 @@ impl QueryEngine {
                 });
             });
 
-            // Auto-compact check before API call
+            // Auto-compact check before API call — uses the resolved config so the
+            // token threshold matches what we're actually sending.
             if crate::compact::auto_compact::should_auto_compact(
                 &current_messages,
-                &self.model_config.model,
-                self.model_config.max_tokens,
+                &request_config.model,
+                request_config.max_tokens,
             ) {
                 tracing::info!("Auto-compacting conversation (token limit approaching)");
                 if let Some(result) = crate::compact::auto_compact::auto_compact_if_needed(
                     &current_messages,
                     &self.provider,
-                    &self.model_config,
+                    &request_config,
                     &mut crate::compact::auto_compact::AutoCompactTracking::default(),
                 )
                 .await
@@ -300,7 +328,7 @@ impl QueryEngine {
 
             match self
                 .provider
-                .stream_message(&current_messages, &self.model_config, on_chunk_loop)
+                .stream_message(&current_messages, &request_config, on_chunk_loop)
                 .await
             {
                 Ok(response) => {
@@ -1518,15 +1546,31 @@ impl QueryEngine {
             ]
         };
 
-        // Apply model override if specified
-        let agent_config = if let Some(model_shortcut) = model_override {
-            let resolved = crate::provider::resolve_model_shortcut(model_shortcut);
-            let mut config = self.model_config.clone();
-            config.model = resolved.to_string();
-            tracing::info!("Sub-agent using model override: {resolved}");
+        // Apply model override if specified, then resolve effort for the sub-agent.
+        // Sub-agents always use at least Medium complexity — they're never trivial queries.
+        let agent_config = {
+            let mut config = if let Some(model_shortcut) = model_override {
+                let resolved = crate::provider::resolve_model_shortcut(model_shortcut);
+                let mut c = self.model_config.clone();
+                c.model = resolved.to_string();
+                tracing::info!("Sub-agent using model override: {resolved}");
+                c
+            } else {
+                self.model_config.clone()
+            };
+            // Read effort from the active session (if any), default to auto/medium for agents
+            let effort = {
+                let state = self.state.read().await;
+                state
+                    .active_session()
+                    .and_then(|s| s.effort.as_deref())
+                    .map(str::to_string)
+            };
+            let caps = model_capabilities(&config.model);
+            let resolved = resolve_effort(effort.as_deref(), &caps, 0.0, MessageComplexity::Medium);
+            config.max_tokens = resolved.max_tokens;
+            config.budget_tokens = (resolved.budget_tokens > 0).then_some(resolved.budget_tokens);
             config
-        } else {
-            self.model_config.clone()
         };
 
         tracing::info!(

@@ -8,6 +8,7 @@ description = "Agentic tool system for One — file ops, bash, grep, etc."
 
 [dependencies]
 one-core.workspace = true
+one-db.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

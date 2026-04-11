@@ -9,7 +9,9 @@ pub mod glob;
 pub mod grep;
 pub mod mcp_resources;
 pub mod notebook_edit;
+pub mod one_md;
 pub mod plan_mode;
+pub mod recall_detail;
 pub mod registry;
 pub mod script_tool;
 pub mod skill_tool;
@@ -77,6 +79,9 @@ pub struct ToolContext {
     /// Files that have been read in this session (for Edit safety checks).
     /// Shared across tool calls via Arc<Mutex<>>.
     pub read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Path to this session's SQLite database file.
+    /// `None` for legacy sessions or when not yet wired up.
+    pub db_path: Option<std::path::PathBuf>,
 }
 
 impl ToolContext {
@@ -88,6 +93,7 @@ impl ToolContext {
             read_files: std::sync::Arc::new(
                 std::sync::Mutex::new(std::collections::HashSet::new()),
             ),
+            db_path: None,
         }
     }
 }
@@ -132,6 +138,7 @@ pub fn create_default_registry() -> registry::ToolRegistry {
     reg.register(Box::new(web_fetch::WebFetchTool));
     reg.register(Box::new(web_search::WebSearchTool));
     reg.register(Box::new(ask_user::AskUserQuestionTool));
+    reg.register(Box::new(recall_detail::RecallDetailTool));
     reg.register(Box::new(sleep::SleepTool));
     reg.register(Box::new(plan_mode::EnterPlanModeTool));
     reg.register(Box::new(plan_mode::ExitPlanModeTool));
@@ -143,6 +150,7 @@ pub fn create_default_registry() -> registry::ToolRegistry {
     reg.register(Box::new(notebook_edit::NotebookEditTool));
     reg.register(Box::new(worktree_tools::EnterWorktreeTool));
     reg.register(Box::new(worktree_tools::ExitWorktreeTool));
+    reg.register(Box::new(one_md::OneMdTool));
 
     // Phase 2: Load plugin tools from ~/.one/plugins/
     if let Some(home) = std::env::var_os("HOME") {

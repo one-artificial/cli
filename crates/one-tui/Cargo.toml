@@ -8,6 +8,7 @@ description = "Terminal UI for One — multi-session ratatui interface"
 
 [dependencies]
 one-core.workspace = true
+one-db.workspace = true
 ratatui.workspace = true
 crossterm.workspace = true
 tokio.workspace = true

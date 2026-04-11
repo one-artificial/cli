@@ -69,6 +69,12 @@ pub enum Event {
         question: String,
         options: Vec<String>,
     },
+    /// Evergreen background compressor completed a compression pass.
+    EvergreenCompressed {
+        session_id: String,
+        /// Number of conversation turns compressed in this pass.
+        turns_compressed: usize,
+    },
     /// Application shutdown requested
     Quit,
 }
