@@ -31,6 +31,10 @@ pub struct ToolCallRecord {
     pub output: Option<String>,
     pub is_error: bool,
     pub duration_ms: Option<u64>,
+    /// Index into the processing-dot animation pool for this specific tool call.
+    /// Not persisted — restored sessions always have output set so the style is unused.
+    #[serde(skip)]
+    pub dot_style: usize,
 }
 
 /// The full conversation for a session, with helper methods.

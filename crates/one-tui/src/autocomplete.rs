@@ -50,6 +50,7 @@ fn all_commands(project_dir: &str) -> Vec<Suggestion> {
         cs("/doctor", "Check system health"),
         cs("/bug", "Report an issue"),
         cs("/plan", "Toggle plan mode"),
+        cs("/debug", "Toggle debug mode (show background activity)"),
         cs("/permissions", "Show permission settings"),
         cs("/mcp", "Show MCP server connections"),
         cs("/memory", "List or search memories"),
@@ -246,7 +247,8 @@ impl Autocomplete {
                 };
 
                 let icon = match s.kind {
-                    SuggestionKind::Command => "/",
+                    // Commands already start with '/' — no separate icon needed
+                    SuggestionKind::Command => "",
                     SuggestionKind::File => "+",
                     SuggestionKind::Directory => "+",
                 };
@@ -263,9 +265,14 @@ impl Autocomplete {
                     ""
                 };
 
+                let entry = if icon.is_empty() {
+                    format!(" {name_display}{suffix}")
+                } else {
+                    format!(" {icon} {name_display}{suffix}")
+                };
                 Line::from(vec![
                     Span::styled(
-                        format!(" {icon} {name_display}{suffix}"),
+                        entry,
                         Style::default().fg(fg).bg(bg).add_modifier(modifier),
                     ),
                     Span::styled(

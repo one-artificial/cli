@@ -108,6 +108,14 @@ impl QueryEngine {
         }
     }
 
+    /// Emit a debug log line for the given session. No-op if the send fails.
+    fn debug(&self, session_id: &str, message: impl Into<String>) {
+        let _ = self.event_tx.send(Event::DebugLog {
+            session_id: session_id.to_string(),
+            message: message.into(),
+        });
+    }
+
     pub fn spawn(mut self) -> tokio::task::JoinHandle<()> {
         let mut event_rx = self.event_tx.subscribe();
 
@@ -184,6 +192,7 @@ impl QueryEngine {
 
         if let Some(ref role) = agent_role {
             tracing::debug!("Routed to {:?} agent", role);
+            self.debug(session_id, format!("agent → {:?}", role));
         }
 
         let messages = {
@@ -287,6 +296,7 @@ impl QueryEngine {
                 request_config.max_tokens,
             ) {
                 tracing::info!("Auto-compacting conversation (token limit approaching)");
+                self.debug(&session_id_owned, "auto-compact → token limit approaching, summarising");
                 if let Some(result) = crate::compact::auto_compact::auto_compact_if_needed(
                     &current_messages,
                     &self.provider,
@@ -326,12 +336,33 @@ impl QueryEngine {
                 done: false,
             });
 
+            self.debug(
+                &session_id_owned,
+                format!(
+                    "api → {} ({} messages)",
+                    self.model_config.model,
+                    current_messages.len()
+                ),
+            );
             match self
                 .provider
                 .stream_message(&current_messages, &request_config, on_chunk_loop)
                 .await
             {
                 Ok(response) => {
+                    self.debug(
+                        &session_id_owned,
+                        format!(
+                            "api ← ↑ {} / ↓ {} tokens{}",
+                            response.usage.input_tokens,
+                            response.usage.output_tokens,
+                            if response.tool_calls.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" · {} tool call(s)", response.tool_calls.len())
+                            }
+                        ),
+                    );
                     // No tool calls → finalize and exit loop
                     if response.tool_calls.is_empty() {
                         {

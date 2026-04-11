@@ -33,6 +33,9 @@ pub struct Session {
     /// Git branch active when this session was created.
     /// Empty until wired up by `with_storage_info()`.
     pub branch: String,
+    /// Debug event log — timestamped messages from background subsystems.
+    /// Not persisted; interleaved with turns in the TUI when debug mode is on.
+    pub debug_events: Vec<(chrono::DateTime<chrono::Utc>, String)>,
 }
 
 impl Session {
@@ -60,6 +63,7 @@ impl Session {
             db_path: PathBuf::new(),
             session_hash: String::new(),
             branch: String::new(),
+            debug_events: Vec::new(),
         }
     }
 

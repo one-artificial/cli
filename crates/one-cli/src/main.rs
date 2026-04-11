@@ -176,7 +176,7 @@ fn default_model_for(provider: Provider) -> String {
 }
 
 fn parse_provider(s: &str) -> Result<Provider> {
-    match s {
+    match s.to_lowercase().as_str() {
         "anthropic" => Ok(Provider::Anthropic),
         "openai" => Ok(Provider::OpenAI),
         "ollama" => Ok(Provider::Ollama),
@@ -264,7 +264,7 @@ async fn main() -> Result<()> {
         } else {
             // Can't infer → fall back to config or auto-detect
             let (pstr, prov) = if !config.provider.default_provider.is_empty() {
-                let p = config.provider.default_provider.clone();
+                let p = config.provider.default_provider.to_lowercase();
                 (p.clone(), parse_provider(&p)?)
             } else {
                 auto_detect_provider(&config)
@@ -273,7 +273,7 @@ async fn main() -> Result<()> {
         }
     } else if !config.provider.default_provider.is_empty() {
         // Config has a default provider
-        let p = config.provider.default_provider.clone();
+        let p = config.provider.default_provider.to_lowercase();
         let provider = parse_provider(&p)?;
         let model = if !config.provider.default_model.is_empty() {
             config.provider.default_model.clone()
@@ -1310,9 +1310,12 @@ async fn main() -> Result<()> {
     let mut app = App::new(state.clone(), event_bus.sender());
     app.run().await?;
 
-    // Print session hash(es) so the user can resume with `one --session <hash>`
+    // Post-exit: session hashes (for --session resume) + token/cost summary
     {
         let s = state.read().await;
+        let now = chrono::Utc::now();
+
+        // Session hash(es) for resuming with `one --session <hash>`
         let hashes: Vec<String> = s
             .sessions
             .values()
@@ -1332,7 +1335,60 @@ async fn main() -> Result<()> {
                 }
             }
         }
+
+        // Token/cost summary per session
+        let mut printed = false;
+        for session in s.sessions.values() {
+            if session.total_input_tokens == 0 {
+                continue;
+            }
+            if !printed {
+                eprintln!();
+                printed = true;
+            }
+            let secs = now
+                .signed_duration_since(session.created_at)
+                .num_seconds()
+                .max(0) as u64;
+            let duration_str = if secs >= 3600 {
+                format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+            } else if secs >= 60 {
+                format!("{}m {}s", secs / 60, secs % 60)
+            } else {
+                format!("{}s", secs)
+            };
+            let turns = session
+                .conversation
+                .turns
+                .iter()
+                .filter(|t| t.role == one_core::conversation::TurnRole::User)
+                .count();
+            let turn_label = if turns == 1 { "turn" } else { "turns" };
+            eprintln!(
+                "\u{2812} {} \u{2014} {} \u{00b7} {} {} \u{00b7} \u{2191} {} \u{00b7} \u{2193} {} tokens \u{00b7} ~${:.4}",
+                session.project_name,
+                duration_str,
+                turns,
+                turn_label,
+                fmt_tokens(session.total_input_tokens),
+                fmt_tokens(session.total_output_tokens),
+                session.cost_usd,
+            );
+        }
     }
 
     Ok(())
+}
+
+/// Format a token count with comma thousands separators (e.g. 12345 → "12,345").
+fn fmt_tokens(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out.chars().rev().collect()
 }

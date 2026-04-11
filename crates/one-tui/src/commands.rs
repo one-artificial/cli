@@ -79,6 +79,7 @@ pub async fn handle_command(
         "/bug" | "/issue" => CommandResult::Message(
             "Report issues at: https://github.com/one-artificial/cli/issues".to_string(),
         ),
+        "/debug" => handle_debug(state).await,
         "/plan" => handle_plan(state).await,
         "/permissions" | "/perms" => handle_permissions(),
         "/mcp" => handle_mcp(),
@@ -148,6 +149,7 @@ fn help_text() -> String {
 /doctor            Check system health
 /bug               Report an issue
 /plan              Toggle plan mode (describe actions without executing)
+/debug             Toggle debug mode (show background activity as muted lines)
 /permissions       Show permission settings and rules
 /mcp               Show MCP server connections and tools
 /memory            List saved memories (or /memory search <query>)
@@ -880,6 +882,20 @@ async fn handle_doctor() -> CommandResult {
     });
 
     CommandResult::Message(format!("## Doctor\n\n{}", checks.join("\n")))
+}
+
+async fn handle_debug(state: &SharedState) -> CommandResult {
+    let mut s = state.write().await;
+    s.debug_mode = !s.debug_mode;
+    if s.debug_mode {
+        CommandResult::Message(
+            "Debug mode: **ON** — background activity will appear as muted lines in chat.\n\
+             Use /debug again to hide."
+                .to_string(),
+        )
+    } else {
+        CommandResult::Message("Debug mode: **OFF**".to_string())
+    }
 }
 
 async fn handle_plan(state: &SharedState) -> CommandResult {

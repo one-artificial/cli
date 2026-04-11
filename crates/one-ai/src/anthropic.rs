@@ -8,7 +8,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const MAX_RETRIES: u32 = 3;
 const ANTHROPIC_VERSION: &str = "2023-06-01";
-const BETA_FLAGS: &str = "interleaved-thinking-2025-05-14,prompt-caching-2024-11-20";
+const BETA_FLAGS: &str = "interleaved-thinking-2025-05-14,advanced-tool-use-2025-11-20";
 
 pub struct AnthropicProvider {
     api_key: String,
