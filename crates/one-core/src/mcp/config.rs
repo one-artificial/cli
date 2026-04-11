@@ -1,13 +1,19 @@
 //! MCP server configuration loading and parsing.
 //!
-//! Reads from:
-//! 1. `.mcp.json` in the project directory (highest priority)
-//! 2. `~/.one/settings.json` global config
+//! Sources searched in priority order (higher overrides lower):
 //!
-//! Supports env var expansion in config values: `${VAR_NAME}`.
+//! 1. Claude Desktop compat — `{config_dir}/Claude/claude_desktop_config.json`
+//!    (macOS: `~/Library/Application Support`, Linux: `~/.config`, Windows: `%APPDATA%`)
+//! 2. One global — `~/.one/mcp.json`
+//! 3. Git root — `<git-root>/.mcp.json` and `<git-root>/mcp.json`
+//!    (skipped when git root == project dir; enables monorepo shared servers)
+//! 4. Project — `<project>/.mcp.json` and `<project>/mcp.json`
+//!
+//! All files use the same `{ "mcpServers": { … } }` format from the MCP spec.
+//! Supports env var expansion: `${VAR_NAME}`.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -48,29 +54,64 @@ pub struct McpConfigFile {
 }
 
 /// Load MCP server configs from all sources for a given project path.
+/// Sources are applied in increasing priority order so project-level entries
+/// always override global ones.
 pub fn load_mcp_configs(project_path: &str) -> HashMap<String, McpServerConfig> {
     let mut configs = HashMap::new();
 
-    // 1. Global config: ~/.one/mcp.json
-    if let Some(home) = dirs_next::home_dir() {
-        let global_path = home.join(".one").join("mcp.json");
-        if let Some(file_configs) = load_config_file(&global_path) {
-            configs.extend(file_configs);
+    // 1. Claude Desktop compat (lowest priority — pick up already-configured servers)
+    if let Some(cfg_dir) = dirs_next::config_dir() {
+        let desktop_path = cfg_dir.join("Claude").join("claude_desktop_config.json");
+        if let Some(c) = load_config_file(&desktop_path) {
+            configs.extend(c);
         }
     }
 
-    // 2. Project config: <project>/.mcp.json (overrides global)
-    let project_mcp = Path::new(project_path).join(".mcp.json");
-    if let Some(file_configs) = load_config_file(&project_mcp) {
-        configs.extend(file_configs);
+    // 2. One global: ~/.one/mcp.json
+    if let Some(home) = dirs_next::home_dir()
+        && let Some(c) = load_config_file(&home.join(".one").join("mcp.json"))
+    {
+        configs.extend(c);
     }
 
-    // Expand env vars in all configs
+    // 3. Git-root level (monorepo shared servers)
+    let project = Path::new(project_path);
+    if let Some(git_root) = find_git_root(project)
+        && git_root != project
+    {
+        for name in [".mcp.json", "mcp.json"] {
+            if let Some(c) = load_config_file(&git_root.join(name)) {
+                configs.extend(c);
+            }
+        }
+    }
+
+    // 4. Project-level (highest priority)
+    for name in [".mcp.json", "mcp.json"] {
+        if let Some(c) = load_config_file(&project.join(name)) {
+            configs.extend(c);
+        }
+    }
+
+    // Expand env vars in all loaded configs
     for config in configs.values_mut() {
         expand_env_vars(config);
     }
 
     configs
+}
+
+/// Walk up from `start` to find the nearest directory containing `.git`.
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_path_buf();
+    loop {
+        if current.join(".git").exists() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
 }
 
 /// Load a single MCP config file.

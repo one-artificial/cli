@@ -383,4 +383,35 @@ View with `/config`. Re-run setup with `/reset`.
 
 ## MCP Servers
 
-Connect any MCP-compatible server via config. Schemas are merged with built-in tool schemas at startup. Deferred tools (loaded on-demand via `tool_search`) are listed by name in the system prompt so the model knows they exist without token cost. `/mcp` shows connected servers and tool counts.
+Connect any MCP-compatible server. All sources use the standard `{ "mcpServers": { … } }` format from the MCP spec. Sources are loaded in priority order — project-level wins:
+
+| Priority | Path |
+|---|---|
+| Lowest | Claude Desktop compat: `{config_dir}/Claude/claude_desktop_config.json` |
+| | One global: `~/.one/mcp.json` |
+| | Git root: `<git-root>/.mcp.json` · `<git-root>/mcp.json` |
+| Highest | Project: `<project>/.mcp.json` · `<project>/mcp.json` |
+
+Stdio server example (`.mcp.json`):
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
+      "env": { "LOG_LEVEL": "info" }
+    }
+  }
+}
+```
+
+Remote/SSE server example:
+```json
+{
+  "mcpServers": {
+    "remote": { "type": "sse", "url": "https://mcp.example.com/sse" }
+  }
+}
+```
+
+Env vars expand in all config values: `"${MY_TOKEN}"`. Schemas from MCP servers are merged with built-in tool schemas at startup. Deferred tools (loaded via `tool_search`) are listed in the system prompt by name so the model knows they exist without token cost. `/mcp` shows connected servers and tool counts.
