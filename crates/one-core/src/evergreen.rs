@@ -111,6 +111,10 @@ impl CompressBatch {
     pub fn len(&self) -> usize {
         self.end_idx.saturating_sub(self.start_idx) + 1
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 /// The complete compression plan for one pass.
@@ -136,10 +140,7 @@ impl EvergreenPlan {
 /// The plan describes *positions* within the current uncompressed-turn list,
 /// not message IDs. The caller (Phase 4b background task) maps positions to
 /// actual DB row IDs.
-pub fn plan_compression(
-    uncompressed_count: usize,
-    cfg: &EvergreenConfig,
-) -> Option<EvergreenPlan> {
+pub fn plan_compression(uncompressed_count: usize, cfg: &EvergreenConfig) -> Option<EvergreenPlan> {
     // Nothing to do if we're within the write tier
     let eligible = uncompressed_count.saturating_sub(cfg.write_tier_turns);
     if eligible < cfg.min_eligible {
@@ -161,10 +162,7 @@ pub fn plan_compression(
 
     // ── Compress (1st-pass) span ─────────────────────────────────────────────
     // Between archive and write tiers.
-    let compress_start = archive_batch
-        .as_ref()
-        .map(|b| b.end_idx + 1)
-        .unwrap_or(0);
+    let compress_start = archive_batch.as_ref().map(|b| b.end_idx + 1).unwrap_or(0);
     let compress_end = uncompressed_count.saturating_sub(cfg.write_tier_turns + 1);
 
     let compress_batch = if compress_end >= compress_start {
@@ -182,11 +180,7 @@ pub fn plan_compression(
         archive_batch,
     };
 
-    if plan.is_empty() {
-        None
-    } else {
-        Some(plan)
-    }
+    if plan.is_empty() { None } else { Some(plan) }
 }
 
 // ── ROI gate ──────────────────────────────────────────────────────────────────
@@ -209,7 +203,7 @@ pub fn roi_gate(span_tokens: u64, summary_tokens: u64, compression_api_cost: u64
 /// Rough token estimate: 1 token ≈ 4 UTF-8 bytes.
 /// Used when exact token counts are unavailable.
 pub fn estimate_tokens(content: &str) -> u64 {
-    (content.len() as u64 + 3) / 4
+    (content.len() as u64).div_ceil(4)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

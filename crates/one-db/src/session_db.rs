@@ -251,9 +251,9 @@ impl SessionDb {
     }
 
     pub fn message_count(&self) -> Result<usize> {
-        let n: i64 =
-            self.conn
-                .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?;
+        let n: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM messages", [], |r| r.get(0))?;
         Ok(n as usize)
     }
 
@@ -348,9 +348,7 @@ impl SessionDb {
 
     /// Read all well-known meta keys into a typed struct.
     pub fn load_session_meta(&self) -> Result<SessionMeta> {
-        let get = |k: &str| -> String {
-            self.get_meta(k).unwrap_or_default().unwrap_or_default()
-        };
+        let get = |k: &str| -> String { self.get_meta(k).unwrap_or_default().unwrap_or_default() };
         Ok(SessionMeta {
             session_id: get("session_id"),
             project_path: get("project_path"),
@@ -503,7 +501,10 @@ mod tests {
     fn test_meta_round_trip() {
         let db = open();
         db.set_meta("model", "claude-sonnet-4-6").unwrap();
-        assert_eq!(db.get_meta("model").unwrap(), Some("claude-sonnet-4-6".into()));
+        assert_eq!(
+            db.get_meta("model").unwrap(),
+            Some("claude-sonnet-4-6".into())
+        );
         assert_eq!(db.get_meta("missing").unwrap(), None);
     }
 
@@ -539,8 +540,15 @@ mod tests {
         let msg_id = db
             .save_message("assistant", "", "2026-04-11T10:00:00Z", None)
             .unwrap();
-        db.save_tool_call(msg_id, "Bash", r#"{"cmd":"ls"}"#, Some("file.rs"), false, Some(42))
-            .unwrap();
+        db.save_tool_call(
+            msg_id,
+            "Bash",
+            r#"{"cmd":"ls"}"#,
+            Some("file.rs"),
+            false,
+            Some(42),
+        )
+        .unwrap();
         let calls = db.load_tool_calls_for_message(msg_id).unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].tool_name, "Bash");

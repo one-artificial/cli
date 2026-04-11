@@ -788,29 +788,29 @@ async fn main() -> Result<()> {
         let first_project = projects.first().map(String::as_str).unwrap_or(".");
         let branch = one_core::worktree::get_current_branch(first_project)
             .unwrap_or_else(|| "main".to_string());
-        if let Ok(sessions) = one_db::StoragePaths::list_sessions(first_project, &branch) {
-            if !sessions.is_empty() {
-                eprintln!("Recent sessions on {}:", branch);
-                for (i, s) in sessions.iter().take(5).enumerate() {
-                    let d = &s.opened_at; // YYYY_MM_DD_HH_MM_SS
-                    let dt_display = if d.len() >= 16 {
-                        format!(
-                            "{}-{}-{} {}:{}",
-                            d.get(0..4).unwrap_or(""),
-                            d.get(5..7).unwrap_or(""),
-                            d.get(8..10).unwrap_or(""),
-                            d.get(11..13).unwrap_or(""),
-                            d.get(14..16).unwrap_or(""),
-                        )
-                    } else {
-                        d.to_string()
-                    };
-                    let label = if i == 0 { " ← most recent" } else { "" };
-                    eprintln!("  [{}]  {}{}", s.session_hash, dt_display, label);
-                }
-                eprintln!("Resume with: one --session <hash>");
-                eprintln!();
+        if let Ok(sessions) = one_db::StoragePaths::list_sessions(first_project, &branch)
+            && !sessions.is_empty()
+        {
+            eprintln!("Recent sessions on {}:", branch);
+            for (i, s) in sessions.iter().take(5).enumerate() {
+                let d = &s.opened_at; // YYYY_MM_DD_HH_MM_SS
+                let dt_display = if d.len() >= 16 {
+                    format!(
+                        "{}-{}-{} {}:{}",
+                        d.get(0..4).unwrap_or(""),
+                        d.get(5..7).unwrap_or(""),
+                        d.get(8..10).unwrap_or(""),
+                        d.get(11..13).unwrap_or(""),
+                        d.get(14..16).unwrap_or(""),
+                    )
+                } else {
+                    d.to_string()
+                };
+                let label = if i == 0 { " ← most recent" } else { "" };
+                eprintln!("  [{}]  {}{}", s.session_hash, dt_display, label);
             }
+            eprintln!("Resume with: one --session <hash>");
+            eprintln!();
         }
     }
 
@@ -850,53 +850,51 @@ async fn main() -> Result<()> {
 
             if is_short_hash {
                 // New-style: locate by 6-char hash under ~/.one/{project}/
-                let found = match one_db::StoragePaths::for_existing_session(
-                    &project_path,
-                    session_hash,
-                ) {
-                    Ok(Some(paths)) => Some(paths),
-                    Ok(None) => {
-                        eprintln!(
-                            "No session found with hash '{session_hash}'. Starting fresh."
-                        );
-                        None
-                    }
-                    Err(e) => {
-                        eprintln!("Error looking up session: {e}. Starting fresh.");
-                        None
-                    }
-                };
+                let found =
+                    match one_db::StoragePaths::for_existing_session(&project_path, session_hash) {
+                        Ok(Some(paths)) => Some(paths),
+                        Ok(None) => {
+                            eprintln!(
+                                "No session found with hash '{session_hash}'. Starting fresh."
+                            );
+                            None
+                        }
+                        Err(e) => {
+                            eprintln!("Error looking up session: {e}. Starting fresh.");
+                            None
+                        }
+                    };
 
                 let session = if let Some(ref paths) = found {
                     // Resume: load messages from per-session SQLite DB
-                    let mut s =
-                        Session::new(project_path.clone(), model_config.clone()).with_storage_info(
+                    let mut s = Session::new(project_path.clone(), model_config.clone())
+                        .with_storage_info(
                             paths.session_db.clone(),
                             paths.session_hash.clone(),
                             paths.branch.clone(),
                         );
-                    if let Ok(session_db) = one_db::SessionDb::open(&paths.session_db) {
-                        if let Ok(messages) = session_db.load_messages(None, None, true) {
-                            for msg in messages {
-                                let role = match msg.role.as_str() {
-                                    "user" => one_core::conversation::TurnRole::User,
-                                    "assistant" => one_core::conversation::TurnRole::Assistant,
-                                    _ => continue,
-                                };
-                                s.conversation.turns.push(
-                                    one_core::conversation::ConversationTurn {
-                                        role,
-                                        content: msg.content,
-                                        timestamp: msg
-                                            .created_at
-                                            .parse()
-                                            .unwrap_or_else(|_| chrono::Utc::now()),
-                                        tool_calls: Vec::new(),
-                                        is_streaming: false,
-                                        tokens_used: None,
-                                    },
-                                );
-                            }
+                    if let Ok(session_db) = one_db::SessionDb::open(&paths.session_db)
+                        && let Ok(messages) = session_db.load_messages(None, None, true)
+                    {
+                        for msg in messages {
+                            let role = match msg.role.as_str() {
+                                "user" => one_core::conversation::TurnRole::User,
+                                "assistant" => one_core::conversation::TurnRole::Assistant,
+                                _ => continue,
+                            };
+                            s.conversation
+                                .turns
+                                .push(one_core::conversation::ConversationTurn {
+                                    role,
+                                    content: msg.content,
+                                    timestamp: msg
+                                        .created_at
+                                        .parse()
+                                        .unwrap_or_else(|_| chrono::Utc::now()),
+                                    tool_calls: Vec::new(),
+                                    is_streaming: false,
+                                    tokens_used: None,
+                                });
                         }
                     }
                     s
@@ -1158,7 +1156,10 @@ async fn main() -> Result<()> {
                                 tokio::task::spawn_blocking(move || {
                                     if let Ok(db) = one_db::SessionDb::open(&db_path_w) {
                                         let _ = db.save_message(
-                                            "assistant", &content_w, &ts_w, tokens_w,
+                                            "assistant",
+                                            &content_w,
+                                            &ts_w,
+                                            tokens_w,
                                         );
                                     }
                                 });
@@ -1320,7 +1321,10 @@ async fn main() -> Result<()> {
             .collect();
         if !hashes.is_empty() {
             if hashes.len() == 1 {
-                eprintln!("Session: [{}]  resume with: one --session {}", hashes[0], hashes[0]);
+                eprintln!(
+                    "Session: [{}]  resume with: one --session {}",
+                    hashes[0], hashes[0]
+                );
             } else {
                 eprintln!("Sessions ended:");
                 for h in &hashes {

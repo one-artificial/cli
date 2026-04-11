@@ -603,7 +603,10 @@ async fn handle_effort(args: &str, state: &SharedState) -> CommandResult {
         ("low", "No extended thinking, 2k output — fast and cheap"),
         ("medium", "20% thinking budget, 8k output — balanced"),
         ("high", "50% thinking budget, 16k output — thorough"),
-        ("max", "80% thinking budget, full output — deepest reasoning (requires thinking-capable model)"),
+        (
+            "max",
+            "80% thinking budget, full output — deepest reasoning (requires thinking-capable model)",
+        ),
     ];
 
     if arg.is_empty() || arg == "current" || arg == "status" {

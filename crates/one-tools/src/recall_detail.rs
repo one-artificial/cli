@@ -156,7 +156,12 @@ mod tests {
         let db_path = temp_db_path("compressed_msg");
         let db = one_db::SessionDb::open(&db_path).unwrap();
         let msg_id = db
-            .save_message("assistant", "The answer is 42.", "2026-04-11T10:00:00Z", None)
+            .save_message(
+                "assistant",
+                "The answer is 42.",
+                "2026-04-11T10:00:00Z",
+                None,
+            )
             .unwrap();
         db.mark_messages_compressed(msg_id, msg_id).unwrap();
         drop(db);

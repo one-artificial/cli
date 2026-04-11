@@ -1567,8 +1567,7 @@ impl QueryEngine {
                     .map(str::to_string)
             };
             let caps = model_capabilities(&config.model);
-            let resolved =
-                resolve_effort(effort.as_deref(), &caps, 0.0, MessageComplexity::Medium);
+            let resolved = resolve_effort(effort.as_deref(), &caps, 0.0, MessageComplexity::Medium);
             config.max_tokens = resolved.max_tokens;
             config.budget_tokens = (resolved.budget_tokens > 0).then_some(resolved.budget_tokens);
             config

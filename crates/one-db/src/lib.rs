@@ -2,7 +2,7 @@ pub mod paths;
 pub mod session_db;
 
 // Re-export the most-used types at crate root for convenience
-pub use paths::{StoragePaths, SessionListing, profile_dir, slugify_branch, slugify_path};
+pub use paths::{SessionListing, StoragePaths, profile_dir, slugify_branch, slugify_path};
 pub use session_db::{EvergreenChunkRow, MessageRow, SessionDb, SessionMeta, ToolCallRow};
 
 // ── Legacy global database (used until Phase 3 migration is complete) ─────────

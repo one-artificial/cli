@@ -38,9 +38,7 @@ impl StoragePaths {
         let one_md = project_dir.join("ONE.md");
 
         let hash = generate_session_hash();
-        let dt = chrono::Local::now()
-            .format("%Y_%m_%d_%H_%M_%S")
-            .to_string();
+        let dt = chrono::Local::now().format("%Y_%m_%d_%H_%M_%S").to_string();
         let folder = session_folder_name(branch, &dt, &hash);
         let session_dir = project_dir.join(&folder);
         let session_db = session_dir.join("session.db");
@@ -153,8 +151,8 @@ pub struct SessionListing {
 
 /// Returns `~/.one/`, creating it if absent.
 pub fn profile_dir() -> Result<PathBuf> {
-    let home = dirs_next::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
+    let home =
+        dirs_next::home_dir().ok_or_else(|| anyhow::anyhow!("Cannot determine home directory"))?;
     let dir = home.join(".one");
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
@@ -286,7 +284,10 @@ mod tests {
         let dt = "2026_04_11_10_46_11";
         let hash = "12bdq2";
         let folder = session_folder_name(branch, dt, hash);
-        assert_eq!(folder, "feat__auth_work_for_sam__2026_04_11_10_46_11____12bdq2");
+        assert_eq!(
+            folder,
+            "feat__auth_work_for_sam__2026_04_11_10_46_11____12bdq2"
+        );
         assert_eq!(hash_from_folder(&folder), hash);
         assert_eq!(datetime_from_folder(&folder), dt);
         assert_eq!(branch_from_folder(&folder), "feat__auth_work_for_sam");

@@ -209,7 +209,11 @@ impl App {
             while let Ok(evt) = self.event_rx.try_recv() {
                 match evt {
                     Event::Quit => return Ok(()),
-                    Event::AiResponseChunk { ref session_id, done, .. } => {
+                    Event::AiResponseChunk {
+                        ref session_id,
+                        done,
+                        ..
+                    } => {
                         if done {
                             self.pet.on_response_complete();
                             self.messages_scroll = 0;
@@ -242,11 +246,11 @@ impl App {
                                     self.tabs.set_title(&sid, title.clone());
                                     self.named_sessions.insert(sid);
                                     if !db_path.as_os_str().is_empty() {
-                                        let _ = tokio::task::spawn_blocking(move || {
+                                        drop(tokio::task::spawn_blocking(move || {
                                             if let Ok(db) = one_db::SessionDb::open(&db_path) {
                                                 let _ = db.set_meta("tab_name", &title);
                                             }
-                                        });
+                                        }));
                                     }
                                 }
                             }
@@ -541,36 +545,32 @@ impl App {
                                 }
                             }
                             KeyCode::Enter => {
-                                if let Some(picker) = self.import_picker.take() {
-                                    if !picker.sessions.is_empty() {
-                                        let info = &picker.sessions[picker.selected];
-                                        let session_id = info.session_id.clone();
-                                        let backend = one_core::storage::StorageBackend::detect(
-                                            &session_id,
-                                        );
-                                        let result = tokio::task::spawn_blocking(move || {
-                                            backend.load(&session_id)
-                                        })
-                                        .await;
-                                        match result {
-                                            Ok(Ok(imported)) => {
-                                                let count = imported.turns.len();
-                                                let source = info.backend.clone();
-                                                let mut state = self.state.write().await;
-                                                if let Some(session) =
-                                                    state.active_session_mut()
-                                                {
-                                                    // Prepend imported turns before existing ones
-                                                    let existing = std::mem::take(
-                                                        &mut session.conversation.turns,
-                                                    );
-                                                    session.conversation.turns =
-                                                        imported.turns;
-                                                    session.conversation.turns.extend(existing);
-                                                    // Persist each imported turn to DB
-                                                    let db_path = session.db_path.clone();
-                                                    if !db_path.as_os_str().is_empty() {
-                                                        let turns_snap = session
+                                if let Some(picker) = self.import_picker.take()
+                                    && !picker.sessions.is_empty()
+                                {
+                                    let info = &picker.sessions[picker.selected];
+                                    let session_id = info.session_id.clone();
+                                    let backend =
+                                        one_core::storage::StorageBackend::detect(&session_id);
+                                    let result = tokio::task::spawn_blocking(move || {
+                                        backend.load(&session_id)
+                                    })
+                                    .await;
+                                    match result {
+                                        Ok(Ok(imported)) => {
+                                            let count = imported.turns.len();
+                                            let source = info.backend.clone();
+                                            let mut state = self.state.write().await;
+                                            if let Some(session) = state.active_session_mut() {
+                                                // Prepend imported turns before existing ones
+                                                let existing =
+                                                    std::mem::take(&mut session.conversation.turns);
+                                                session.conversation.turns = imported.turns;
+                                                session.conversation.turns.extend(existing);
+                                                // Persist each imported turn to DB
+                                                let db_path = session.db_path.clone();
+                                                if !db_path.as_os_str().is_empty() {
+                                                    let turns_snap = session
                                                             .conversation
                                                             .turns
                                                             .iter()
@@ -586,49 +586,39 @@ impl App {
                                                                 )
                                                             })
                                                             .collect::<Vec<_>>();
-                                                        let src = source.clone();
-                                                        tokio::task::spawn_blocking(
-                                                            move || {
-                                                                if let Ok(db) =
-                                                                    one_db::SessionDb::open(
-                                                                        &db_path,
-                                                                    )
-                                                                {
-                                                                    for (role, content, ts) in
-                                                                        &turns_snap
-                                                                    {
-                                                                        let _ = db.save_message(
-                                                                            role, content, ts,
-                                                                            None,
-                                                                        );
-                                                                    }
-                                                                    let _ = db.set_meta(
-                                                                        "imported_from",
-                                                                        &src.to_lowercase(),
-                                                                    );
-                                                                }
-                                                            },
-                                                        );
-                                                    }
-                                                    // Show confirmation turn
-                                                    session.conversation.start_assistant_response();
-                                                    session.conversation.append_to_current(
-                                                        &format!("Imported {count} turns from {source}.")
-                                                    );
-                                                    session.conversation.finish_current(None);
+                                                    let src = source.clone();
+                                                    tokio::task::spawn_blocking(move || {
+                                                        if let Ok(db) =
+                                                            one_db::SessionDb::open(&db_path)
+                                                        {
+                                                            for (role, content, ts) in &turns_snap {
+                                                                let _ = db.save_message(
+                                                                    role, content, ts, None,
+                                                                );
+                                                            }
+                                                            let _ = db.set_meta(
+                                                                "imported_from",
+                                                                &src.to_lowercase(),
+                                                            );
+                                                        }
+                                                    });
                                                 }
+                                                // Show confirmation turn
+                                                session.conversation.start_assistant_response();
+                                                session.conversation.append_to_current(&format!(
+                                                    "Imported {count} turns from {source}."
+                                                ));
+                                                session.conversation.finish_current(None);
                                             }
-                                            _ => {
-                                                let mut state = self.state.write().await;
-                                                if let Some(session) =
-                                                    state.active_session_mut()
-                                                {
-                                                    session.conversation.start_assistant_response();
-                                                    session.conversation.append_to_current(
-                                                        "Failed to load session.",
-                                                    );
-                                                    session.conversation.finish_current(None);
-                                                }
+                                        }
+                                        _ => {
+                                            let mut state = self.state.write().await;
+                                            if let Some(session) = state.active_session_mut() {
+                                                session.conversation.start_assistant_response();
+                                                session
+                                                    .conversation
+                                                    .append_to_current("Failed to load session.");
+                                                session.conversation.finish_current(None);
                                             }
                                         }
                                     }
@@ -1999,34 +1989,76 @@ impl App {
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
             .title(" import session ")
-            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+            .title_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            );
         let inner = block.inner(dialog);
         f.render_widget(block, dialog);
 
         let dim = Style::default().fg(Color::DarkGray);
-        let mut lines = vec![Line::from(""), Line::from(Span::styled(" Select a session to import as context:", Style::default().fg(Color::White))), Line::from("")];
+        let mut lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                " Select a session to import as context:",
+                Style::default().fg(Color::White),
+            )),
+            Line::from(""),
+        ];
 
         for (i, s) in picker.sessions.iter().enumerate() {
-            let date = if s.timestamp.len() >= 10 { &s.timestamp[..10] } else { &s.timestamp };
-            let label = format!(" {} | {} | {}", date, s.backend, s.project_path);
-            let preview = format!("   \"{}\"", if s.first_message.len() > 55 { format!("{}...", &s.first_message[..55]) } else { s.first_message.clone() });
-            if i == picker.selected {
-                lines.push(Line::from(Span::styled(format!(" ❯{}", &label[1..]), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
-                lines.push(Line::from(Span::styled(preview, Style::default().fg(Color::White))));
+            let date = if s.timestamp.len() >= 10 {
+                &s.timestamp[..10]
             } else {
-                lines.push(Line::from(Span::styled(label, Style::default().fg(Color::White))));
+                &s.timestamp
+            };
+            let label = format!(" {} | {} | {}", date, s.backend, s.project_path);
+            let preview = format!(
+                "   \"{}\"",
+                if s.first_message.len() > 55 {
+                    format!("{}...", &s.first_message[..55])
+                } else {
+                    s.first_message.clone()
+                }
+            );
+            if i == picker.selected {
+                lines.push(Line::from(Span::styled(
+                    format!(" ❯{}", &label[1..]),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    preview,
+                    Style::default().fg(Color::White),
+                )));
+            } else {
+                lines.push(Line::from(Span::styled(
+                    label,
+                    Style::default().fg(Color::White),
+                )));
                 lines.push(Line::from(Span::styled(preview, dim)));
             }
             lines.push(Line::from(""));
         }
 
         if let Some(ref status) = picker.status {
-            lines.push(Line::from(Span::styled(format!(" {status}"), Style::default().fg(Color::Green))));
+            lines.push(Line::from(Span::styled(
+                format!(" {status}"),
+                Style::default().fg(Color::Green),
+            )));
         } else {
-            lines.push(Line::from(Span::styled(" ↑↓/jk navigate  Enter import  Esc cancel", dim)));
+            lines.push(Line::from(Span::styled(
+                " ↑↓/jk navigate  Enter import  Esc cancel",
+                dim,
+            )));
         }
 
-        f.render_widget(Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }), inner);
+        f.render_widget(
+            Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }),
+            inner,
+        );
     }
 
     /// Render the permission prompt inline.
@@ -2840,13 +2872,15 @@ impl App {
                 .unwrap_or_default();
 
             // Build the full prompt: "~/path (branch) $"
-            let branch_part = branch.as_ref().map(|b| format!(" ({})", b)).unwrap_or_default();
+            let branch_part = branch
+                .as_ref()
+                .map(|b| format!(" ({})", b))
+                .unwrap_or_default();
             let mut full_title = format!("{}{} $", pwd, branch_part);
 
             // Truncate to max 80 characters, preserving the branch at the end
             if full_title.len() > 80 {
-                let max_path_len = 80_usize
-                    .saturating_sub(branch_part.len() + 2); // 2 for " $"
+                let max_path_len = 80_usize.saturating_sub(branch_part.len() + 2); // 2 for " $"
                 if max_path_len > 10 {
                     let keep = (max_path_len - 3) / 2; // 3 for "..."
                     let path_truncated = format!("{}...{}", &pwd[..keep], &pwd[pwd.len() - keep..]);
@@ -3226,8 +3260,8 @@ fn derive_tab_title(content: &str) -> String {
     const STOP_WORDS: &[&str] = &[
         "i", "a", "an", "the", "is", "are", "was", "were", "to", "of", "for", "in", "on", "at",
         "by", "as", "be", "it", "do", "so", "or", "if", "no", "my", "we", "me", "he", "she",
-        "they", "you", "your", "this", "that", "with", "from", "not", "can", "will", "have",
-        "has", "had", "but", "and", "here", "let", "ll", "ve", "re", "s", "d", "m",
+        "they", "you", "your", "this", "that", "with", "from", "not", "can", "will", "have", "has",
+        "had", "but", "and", "here", "let", "ll", "ve", "re", "s", "d", "m",
     ];
 
     // Strip markdown characters; keep alphanumeric, hyphens, spaces
@@ -3261,7 +3295,12 @@ fn derive_tab_title(content: &str) -> String {
     let title = words.join(" ");
     if title.is_empty() {
         // Fallback: truncate raw content
-        content.chars().take(12).collect::<String>().trim().to_string()
+        content
+            .chars()
+            .take(12)
+            .collect::<String>()
+            .trim()
+            .to_string()
     } else if title.len() > 20 {
         title[..20].trim_end().to_string()
     } else {

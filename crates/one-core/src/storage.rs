@@ -33,7 +33,9 @@ impl StorageBackend {
 
         // Check Gemini sessions
         if let Some(path) = find_gemini_session(session_id) {
-            return Self::Gemini { checkpoint_path: path };
+            return Self::Gemini {
+                checkpoint_path: path,
+            };
         }
 
         // Default to native
@@ -56,7 +58,7 @@ impl StorageBackend {
             Self::ClaudeCode { jsonl_path } => append_claude_code_turn(jsonl_path, turn),
             Self::Codex { session_path } => append_codex_turn(session_path, turn),
             Self::Gemini { .. } => Ok(()), // Gemini is read-only import source
-            Self::Native => Ok(()), // Handled by DB persistence task
+            Self::Native => Ok(()),        // Handled by DB persistence task
         }
     }
 }
@@ -548,7 +550,11 @@ fn gemini_tmp_dir() -> PathBuf {
 
 fn find_gemini_session(session_id: &str) -> Option<PathBuf> {
     let checkpoint = gemini_tmp_dir().join(session_id).join("checkpoint.json");
-    if checkpoint.exists() { Some(checkpoint) } else { None }
+    if checkpoint.exists() {
+        Some(checkpoint)
+    } else {
+        None
+    }
 }
 
 /// List Gemini CLI sessions from ~/.gemini/tmp/

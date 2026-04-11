@@ -71,13 +71,17 @@ async fn run(
             } => {
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-                if let Err(e) =
-                    maybe_compress(&session_id, &state, &event_tx, &provider, &compress_config, &cfg)
-                        .await
+                if let Err(e) = maybe_compress(
+                    &session_id,
+                    &state,
+                    &event_tx,
+                    &provider,
+                    &compress_config,
+                    &cfg,
+                )
+                .await
                 {
-                    tracing::warn!(
-                        "evergreen: compression attempt failed for {session_id}: {e}"
-                    );
+                    tracing::warn!("evergreen: compression attempt failed for {session_id}: {e}");
                 }
             }
             Event::Quit => break,

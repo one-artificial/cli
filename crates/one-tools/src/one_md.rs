@@ -15,6 +15,7 @@ use crate::{Tool, ToolContext, ToolResult};
 /// Path resolution order:
 /// 1. `{working_dir}/ONE.md`   — root-level (most common)
 /// 2. `{working_dir}/.one/ONE.md` — subdirectory shim (for monorepos or shared configs)
+///
 /// When writing a new file, always writes to root-level.
 pub struct OneMdTool;
 
@@ -108,18 +109,18 @@ impl Tool for OneMdTool {
                 }
 
                 "write" => {
-                    let content = input["content"].as_str().ok_or_else(|| {
-                        anyhow::anyhow!("content is required when action=write")
-                    })?;
+                    let content = input["content"]
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("content is required when action=write"))?;
 
                     // Create parent directory if needed (handles the .one/ shim case)
-                    if let Some(parent) = path.parent() {
-                        if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                            return Ok(ToolResult::error(format!(
-                                "Failed to create directory {}: {e}",
-                                parent.display()
-                            )));
-                        }
+                    if let Some(parent) = path.parent()
+                        && let Err(e) = tokio::fs::create_dir_all(parent).await
+                    {
+                        return Ok(ToolResult::error(format!(
+                            "Failed to create directory {}: {e}",
+                            parent.display()
+                        )));
                     }
 
                     match tokio::fs::write(&path, content).await {
@@ -203,7 +204,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!write_result.is_error, "write failed: {}", write_result.output);
+        assert!(
+            !write_result.is_error,
+            "write failed: {}",
+            write_result.output
+        );
         assert!(write_result.output.contains("Wrote ONE.md"));
 
         // Read back
