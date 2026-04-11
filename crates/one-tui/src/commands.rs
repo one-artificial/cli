@@ -22,6 +22,8 @@ pub enum CommandResult {
     NotACommand,
     /// Quit the application
     Quit,
+    /// Open the interactive session import picker
+    OpenImportPicker,
 }
 
 /// Process a slash command. Returns how to handle it.
@@ -54,7 +56,16 @@ pub async fn handle_command(
         "/reset" => handle_reset(),
         "/provider" => handle_provider(args).await,
         "/plugin" | "/plugins" => handle_plugins(),
-        "/import" | "/history" => handle_all_sessions(),
+        "/import" => CommandResult::OpenImportPicker,
+        "/history" => handle_all_sessions(),
+        "/one-md" | "/onemd" => CommandResult::SendToAi(
+            "Please use the OneMd tool to generate or update ONE.md for this project. \
+             First read the existing file (action=read) — if it exists, preserve and improve it. \
+             Then write a complete, accurate ONE.md (action=write) covering: project purpose, \
+             tech stack, architecture overview, key design decisions, coding conventions, \
+             build/test commands, and any important gotchas. Keep it concise and scannable."
+                .to_string(),
+        ),
         "/model" => handle_model(args, state).await,
         "/cost" => handle_cost(state).await,
         "/compact" => handle_compact(state).await,
@@ -127,7 +138,9 @@ fn help_text() -> String {
 /inbox             Show notification count
 /status            Show connection and provider status
 /plugin            List installed plugins
-/history           Browse previous sessions
+/import            Import a session (Claude Code, Codex, Gemini picker)
+/history           Browse previous sessions (text list)
+/one-md            Generate or update ONE.md (AI writes project context file)
 /effort <level>    Set reasoning effort (low/medium/high/max/auto)
 /fast              Toggle fast mode (faster streaming)
 /diff              Show git diff summary
@@ -156,6 +169,7 @@ Up/Down arrow      Browse input history
 PageUp/PageDown    Scroll conversation
 Ctrl+O             Open transcript view (full conversation)
 Ctrl+E             Toggle show all / recent in transcript
+Ctrl+B             Toggle ONE.md sidebar (project context)
 Ctrl+T             New session
 Ctrl+W             Close session (with confirmation)
 Ctrl+Shift+[/]     Cycle between tabs
@@ -586,16 +600,10 @@ async fn handle_effort(args: &str, state: &SharedState) -> CommandResult {
 
     const VALID_LEVELS: &[&str] = &["low", "medium", "high", "max"];
     const DESCRIPTIONS: &[(&str, &str)] = &[
-        ("low", "Quick, straightforward implementation"),
-        ("medium", "Balanced approach with standard testing"),
-        (
-            "high",
-            "Comprehensive implementation with extensive testing",
-        ),
-        (
-            "max",
-            "Maximum capability with deepest reasoning (Opus 4.6 only)",
-        ),
+        ("low", "No extended thinking, 2k output — fast and cheap"),
+        ("medium", "20% thinking budget, 8k output — balanced"),
+        ("high", "50% thinking budget, 16k output — thorough"),
+        ("max", "80% thinking budget, full output — deepest reasoning (requires thinking-capable model)"),
     ];
 
     if arg.is_empty() || arg == "current" || arg == "status" {
@@ -613,7 +621,12 @@ async fn handle_effort(args: &str, state: &SharedState) -> CommandResult {
         for (level, desc) in DESCRIPTIONS {
             help.push_str(&format!("- **{level}**: {desc}\n"));
         }
-        help.push_str("- **auto**: Use the default effort level for your model");
+        help.push_str(
+            "- **auto**: dynamically picks level from message complexity \
+             and available context headroom\n\n\
+             Thinking budgets are fractions of the model's capability — \
+             set automatically for the active model.",
+        );
         return CommandResult::Message(help);
     }
 
@@ -627,20 +640,25 @@ async fn handle_effort(args: &str, state: &SharedState) -> CommandResult {
 
     if !VALID_LEVELS.contains(&arg.as_str()) {
         return CommandResult::Message(format!(
-            "Invalid argument: {arg}. Valid options are: low, medium, high, max, auto"
+            "Invalid argument: {arg}. Valid options: low, medium, high, max, auto"
         ));
     }
 
-    // Check max is only for Opus 4.6
+    // Warn (not block) if max is requested on a model without extended thinking
     if arg == "max" {
         let s = state.read().await;
-        let is_opus = s
+        let supports = s
             .active_session()
-            .map(|s| s.model_config.model.to_lowercase().contains("opus-4-6"))
+            .map(|s| {
+                one_core::provider::model_capabilities(&s.model_config.model).supports_thinking
+            })
             .unwrap_or(false);
-        if !is_opus {
+        if !supports {
             return CommandResult::Message(
-                "max effort is only supported on Opus 4.6. Using high instead.".to_string(),
+                "max effort requires a thinking-capable model (e.g. claude-opus-4-6, \
+                 claude-sonnet-4-6). The current model does not support extended thinking — \
+                 use **high** instead."
+                    .to_string(),
             );
         }
     }
@@ -656,7 +674,7 @@ async fn handle_effort(args: &str, state: &SharedState) -> CommandResult {
         session.effort = Some(arg.clone());
     }
 
-    CommandResult::Message(format!("Set effort level to {arg}: {desc}"))
+    CommandResult::Message(format!("Effort → **{arg}**: {desc}"))
 }
 
 async fn handle_fast(state: &SharedState) -> CommandResult {

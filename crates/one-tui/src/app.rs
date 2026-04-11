@@ -46,6 +46,14 @@ struct ProviderPickerState {
     selected: usize,
 }
 
+/// Session import picker — lists sessions from all CLI backends.
+struct ImportPickerState {
+    sessions: Vec<one_core::storage::SessionInfo>,
+    selected: usize,
+    /// Status line shown at the bottom of the dialog ("Imported 12 turns", etc.)
+    status: Option<String>,
+}
+
 /// A provider that has been detected as configured (has credentials).
 struct ConfiguredProvider {
     provider: one_core::provider::Provider,
@@ -69,6 +77,8 @@ pub struct App {
     permission_prompt: Option<PermissionPromptState>,
     /// Provider picker for /new when multiple providers configured
     provider_picker: Option<ProviderPickerState>,
+    /// Session import picker (/import command)
+    import_picker: Option<ImportPickerState>,
     /// Spinner animation tick (cycles through frames)
     spinner_tick: u8,
     /// Pending close-session confirmation (true = waiting for y/n)
@@ -89,6 +99,12 @@ pub struct App {
     transcript_show_all: bool,
     /// Scroll position within transcript mode
     transcript_scroll: u16,
+    /// Sessions whose tab title has already been derived from first response
+    named_sessions: std::collections::HashSet<String>,
+    /// ONE.md sidebar open (Ctrl+B toggle)
+    onemed_open: bool,
+    /// Cached content of the active project's ONE.md
+    onemed_content: Option<String>,
 }
 
 impl App {
@@ -106,6 +122,7 @@ impl App {
             last_ctrl_c: None,
             permission_prompt: None,
             provider_picker: None,
+            import_picker: None,
             spinner_tick: 0,
             close_confirm: false,
             stream_started: None,
@@ -116,6 +133,9 @@ impl App {
             transcript_mode: false,
             transcript_show_all: false,
             transcript_scroll: 0,
+            named_sessions: std::collections::HashSet::new(),
+            onemed_open: false,
+            onemed_content: None,
         }
     }
 
@@ -189,11 +209,47 @@ impl App {
             while let Ok(evt) = self.event_rx.try_recv() {
                 match evt {
                     Event::Quit => return Ok(()),
-                    Event::AiResponseChunk { done, .. } => {
+                    Event::AiResponseChunk { ref session_id, done, .. } => {
                         if done {
                             self.pet.on_response_complete();
                             self.messages_scroll = 0;
                             self.stream_started = None;
+                            // Derive tab title from first AI response
+                            let sid = session_id.clone();
+                            if !self.named_sessions.contains(&sid) {
+                                let maybe_derive = {
+                                    let s = self.state.read().await;
+                                    s.sessions.get(&sid).and_then(|sess| {
+                                        if sess.conversation.turns.len() == 2 {
+                                            let content = sess
+                                                .conversation
+                                                .turns
+                                                .last()
+                                                .map(|t| t.content.as_str())
+                                                .unwrap_or("");
+                                            let title = derive_tab_title(content);
+                                            if !title.is_empty() {
+                                                Some((title, sess.db_path.clone()))
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                };
+                                if let Some((title, db_path)) = maybe_derive {
+                                    self.tabs.set_title(&sid, title.clone());
+                                    self.named_sessions.insert(sid);
+                                    if !db_path.as_os_str().is_empty() {
+                                        let _ = tokio::task::spawn_blocking(move || {
+                                            if let Ok(db) = one_db::SessionDb::open(&db_path) {
+                                                let _ = db.set_meta("tab_name", &title);
+                                            }
+                                        });
+                                    }
+                                }
+                            }
                         } else {
                             self.pet.on_response_start();
                             if self.stream_started.is_none() {
@@ -435,6 +491,7 @@ impl App {
                                         model: chosen.model.clone(),
                                         max_tokens: 8000,
                                         temperature: None,
+                                        budget_tokens: None,
                                     };
                                     let session = one_core::session::Session::new(
                                         picker.project_path,
@@ -459,6 +516,126 @@ impl App {
                             }
                             KeyCode::Esc => {
                                 self.provider_picker = None;
+                            }
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
+
+                // Handle import picker input
+                if self.import_picker.is_some() {
+                    if let CrosstermEvent::Key(key) = crossterm_event {
+                        match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                if let Some(ref mut p) = self.import_picker {
+                                    p.selected = p.selected.saturating_sub(1);
+                                }
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                if let Some(ref mut p) = self.import_picker {
+                                    let max = p.sessions.len().saturating_sub(1);
+                                    if p.selected < max {
+                                        p.selected += 1;
+                                    }
+                                }
+                            }
+                            KeyCode::Enter => {
+                                if let Some(picker) = self.import_picker.take() {
+                                    if !picker.sessions.is_empty() {
+                                        let info = &picker.sessions[picker.selected];
+                                        let session_id = info.session_id.clone();
+                                        let backend = one_core::storage::StorageBackend::detect(
+                                            &session_id,
+                                        );
+                                        let result = tokio::task::spawn_blocking(move || {
+                                            backend.load(&session_id)
+                                        })
+                                        .await;
+                                        match result {
+                                            Ok(Ok(imported)) => {
+                                                let count = imported.turns.len();
+                                                let source = info.backend.clone();
+                                                let mut state = self.state.write().await;
+                                                if let Some(session) =
+                                                    state.active_session_mut()
+                                                {
+                                                    // Prepend imported turns before existing ones
+                                                    let existing = std::mem::take(
+                                                        &mut session.conversation.turns,
+                                                    );
+                                                    session.conversation.turns =
+                                                        imported.turns;
+                                                    session.conversation.turns.extend(existing);
+                                                    // Persist each imported turn to DB
+                                                    let db_path = session.db_path.clone();
+                                                    if !db_path.as_os_str().is_empty() {
+                                                        let turns_snap = session
+                                                            .conversation
+                                                            .turns
+                                                            .iter()
+                                                            .take(count)
+                                                            .map(|t| {
+                                                                (
+                                                                    match t.role {
+                                                                        one_core::conversation::TurnRole::User => "user",
+                                                                        _ => "assistant",
+                                                                    },
+                                                                    t.content.clone(),
+                                                                    t.timestamp.to_rfc3339(),
+                                                                )
+                                                            })
+                                                            .collect::<Vec<_>>();
+                                                        let src = source.clone();
+                                                        tokio::task::spawn_blocking(
+                                                            move || {
+                                                                if let Ok(db) =
+                                                                    one_db::SessionDb::open(
+                                                                        &db_path,
+                                                                    )
+                                                                {
+                                                                    for (role, content, ts) in
+                                                                        &turns_snap
+                                                                    {
+                                                                        let _ = db.save_message(
+                                                                            role, content, ts,
+                                                                            None,
+                                                                        );
+                                                                    }
+                                                                    let _ = db.set_meta(
+                                                                        "imported_from",
+                                                                        &src.to_lowercase(),
+                                                                    );
+                                                                }
+                                                            },
+                                                        );
+                                                    }
+                                                    // Show confirmation turn
+                                                    session.conversation.start_assistant_response();
+                                                    session.conversation.append_to_current(
+                                                        &format!("Imported {count} turns from {source}.")
+                                                    );
+                                                    session.conversation.finish_current(None);
+                                                }
+                                            }
+                                            _ => {
+                                                let mut state = self.state.write().await;
+                                                if let Some(session) =
+                                                    state.active_session_mut()
+                                                {
+                                                    session.conversation.start_assistant_response();
+                                                    session.conversation.append_to_current(
+                                                        "Failed to load session.",
+                                                    );
+                                                    session.conversation.finish_current(None);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Esc => {
+                                self.import_picker = None;
                             }
                             _ => {}
                         }
@@ -644,6 +821,7 @@ impl App {
                                     model: cp.model.clone(),
                                     max_tokens: 8000,
                                     temperature: None,
+                                    budget_tokens: None,
                                 }
                             } else {
                                 let s = self.state.read().await;
@@ -674,6 +852,34 @@ impl App {
                     (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
                         self.transcript_mode = true;
                         self.transcript_scroll = 0;
+                    }
+                    // ONE.md sidebar toggle: Ctrl+B
+                    (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
+                        self.onemed_open = !self.onemed_open;
+                        if self.onemed_open {
+                            // Resolve path: root ONE.md → .one/ONE.md shim → none
+                            let path = {
+                                let s = self.state.read().await;
+                                s.active_session().and_then(|sess| {
+                                    let root =
+                                        std::path::PathBuf::from(&sess.project_path).join("ONE.md");
+                                    let dotone = std::path::PathBuf::from(&sess.project_path)
+                                        .join(".one")
+                                        .join("ONE.md");
+                                    if root.exists() {
+                                        Some(root)
+                                    } else if dotone.exists() {
+                                        Some(dotone)
+                                    } else {
+                                        None
+                                    }
+                                })
+                            };
+                            self.onemed_content =
+                                path.and_then(|p| std::fs::read_to_string(&p).ok());
+                        } else {
+                            self.onemed_content = None;
+                        }
                     }
                     // Close session: Ctrl+W (with confirmation)
                     (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
@@ -721,6 +927,9 @@ impl App {
                             self.input.delete_line();
                         } else if self.help_open {
                             self.help_open = false;
+                        } else if self.onemed_open {
+                            self.onemed_open = false;
+                            self.onemed_content = None;
                         } else if self.autocomplete.visible {
                             self.autocomplete.visible = false;
                         } else {
@@ -950,6 +1159,7 @@ impl App {
                                                     model: cp.model.clone(),
                                                     max_tokens: 8000,
                                                     temperature: None,
+                                                    budget_tokens: None,
                                                 }
                                             } else {
                                                 let s = self.state.read().await;
@@ -1073,6 +1283,32 @@ impl App {
                                         return Ok(());
                                     }
                                     crate::commands::CommandResult::NotACommand => {}
+                                    crate::commands::CommandResult::OpenImportPicker => {
+                                        let sessions = tokio::task::spawn_blocking(
+                                            one_core::storage::list_all_importable_sessions,
+                                        )
+                                        .await
+                                        .unwrap_or_else(|_| Ok(Vec::new()))
+                                        .unwrap_or_default();
+
+                                        if sessions.is_empty() {
+                                            let mut state = self.state.write().await;
+                                            if let Some(session) = state.active_session_mut() {
+                                                session.conversation.push_user_message(msg);
+                                                session.conversation.start_assistant_response();
+                                                session.conversation.append_to_current(
+                                                    "No sessions found.\n\nSearched:\n  ~/.claude/projects/  (Claude Code)\n  ~/.codex/            (Codex)\n  ~/.gemini/tmp/       (Gemini CLI)"
+                                                );
+                                                session.conversation.finish_current(None);
+                                            }
+                                        } else {
+                                            self.import_picker = Some(ImportPickerState {
+                                                sessions,
+                                                selected: 0,
+                                                status: None,
+                                            });
+                                        }
+                                    }
                                 }
                             } else {
                                 self.pet.on_user_message();
@@ -1222,10 +1458,11 @@ impl App {
 
             self.draw_banner_compact(f, chunks[0], snapshot);
             self.draw_tabs(f, chunks[1]);
+            let msg_area = self.split_for_sidebar(f, chunks[2]);
             if self.tabs.active_session_id().is_none() {
-                self.draw_inbox(f, chunks[2], snapshot);
+                self.draw_inbox(f, msg_area, snapshot);
             } else {
-                self.draw_messages(f, chunks[2], snapshot);
+                self.draw_messages(f, msg_area, snapshot);
             }
             if let Some(ref prompt) = self.permission_prompt {
                 self.draw_permission_inline(f, chunks[3], prompt);
@@ -1267,10 +1504,11 @@ impl App {
 
                 self.draw_banner_compact(f, chunks[0], snapshot);
                 self.draw_tabs(f, chunks[1]);
+                let msg_area = self.split_for_sidebar(f, chunks[2]);
                 if self.tabs.active_session_id().is_none() {
-                    self.draw_inbox(f, chunks[2], snapshot);
+                    self.draw_inbox(f, msg_area, snapshot);
                 } else {
-                    self.draw_messages(f, chunks[2], snapshot);
+                    self.draw_messages(f, msg_area, snapshot);
                 }
                 self.draw_help_overlay(f, chunks[3]);
             } else {
@@ -1287,10 +1525,11 @@ impl App {
 
                 self.draw_banner_compact(f, chunks[0], snapshot);
                 self.draw_tabs(f, chunks[1]);
+                let msg_area = self.split_for_sidebar(f, chunks[2]);
                 if self.tabs.active_session_id().is_none() {
-                    self.draw_inbox(f, chunks[2], snapshot);
+                    self.draw_inbox(f, msg_area, snapshot);
                 } else {
-                    self.draw_messages(f, chunks[2], snapshot);
+                    self.draw_messages(f, msg_area, snapshot);
                 }
                 self.draw_input(f, chunks[3], snapshot);
                 self.autocomplete.render(f, chunks[3]);
@@ -1300,6 +1539,11 @@ impl App {
         // Provider picker overlay (drawn on top of everything)
         if let Some(ref picker) = self.provider_picker {
             self.draw_provider_picker(f, picker);
+        }
+
+        // Import picker overlay (drawn on top of everything)
+        if let Some(ref picker) = self.import_picker {
+            self.draw_import_picker(f, picker);
         }
     }
 
@@ -1739,6 +1983,52 @@ impl App {
         f.render_widget(content, inner);
     }
 
+    fn draw_import_picker(&self, f: &mut Frame, picker: &ImportPickerState) {
+        use ratatui::widgets::Clear;
+
+        let area = f.area();
+        let height = (picker.sessions.len() as u16 * 3 + 6).min(area.height.saturating_sub(4));
+        let width = 72u16.min(area.width.saturating_sub(4));
+        let x = (area.width.saturating_sub(width)) / 2;
+        let y = (area.height.saturating_sub(height)) / 2;
+        let dialog = Rect::new(x, y, width, height);
+
+        f.render_widget(Clear, dialog);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" import session ")
+            .title_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        let inner = block.inner(dialog);
+        f.render_widget(block, dialog);
+
+        let dim = Style::default().fg(Color::DarkGray);
+        let mut lines = vec![Line::from(""), Line::from(Span::styled(" Select a session to import as context:", Style::default().fg(Color::White))), Line::from("")];
+
+        for (i, s) in picker.sessions.iter().enumerate() {
+            let date = if s.timestamp.len() >= 10 { &s.timestamp[..10] } else { &s.timestamp };
+            let label = format!(" {} | {} | {}", date, s.backend, s.project_path);
+            let preview = format!("   \"{}\"", if s.first_message.len() > 55 { format!("{}...", &s.first_message[..55]) } else { s.first_message.clone() });
+            if i == picker.selected {
+                lines.push(Line::from(Span::styled(format!(" ❯{}", &label[1..]), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))));
+                lines.push(Line::from(Span::styled(preview, Style::default().fg(Color::White))));
+            } else {
+                lines.push(Line::from(Span::styled(label, Style::default().fg(Color::White))));
+                lines.push(Line::from(Span::styled(preview, dim)));
+            }
+            lines.push(Line::from(""));
+        }
+
+        if let Some(ref status) = picker.status {
+            lines.push(Line::from(Span::styled(format!(" {status}"), Style::default().fg(Color::Green))));
+        } else {
+            lines.push(Line::from(Span::styled(" ↑↓/jk navigate  Enter import  Esc cancel", dim)));
+        }
+
+        f.render_widget(Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false }), inner);
+    }
+
     /// Render the permission prompt inline.
     /// Tool category header, command display, numbered menu, footer hints.
     /// Overlays the input + status bar area.
@@ -1992,8 +2282,10 @@ impl App {
                         51..=75 => Color::Yellow,
                         _ => Color::Red,
                     };
+                    let filled = ((pct as usize * 5 + 50) / 100).min(5);
+                    let bar: String = "▓".repeat(filled) + &"░".repeat(5 - filled);
                     spans.push(Span::styled(
-                        format!("  {pct}%"),
+                        format!("  {bar} {pct}%"),
                         Style::default().fg(pct_color),
                     ));
                 }
@@ -2023,12 +2315,62 @@ impl App {
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
+    /// Split `area` horizontally for the ONE.md sidebar.
+    /// Renders the sidebar in the right 30% and returns the left 70% for messages.
+    /// When the sidebar is closed returns `area` unchanged.
+    fn split_for_sidebar(&self, f: &mut Frame, area: Rect) -> Rect {
+        if !self.onemed_open {
+            return area;
+        }
+        let h_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
+            .split(area);
+        self.draw_onemed_sidebar(f, h_chunks[1]);
+        h_chunks[0]
+    }
+
+    fn draw_onemed_sidebar(&self, f: &mut Frame, area: Rect) {
+        let dim = Style::default().fg(Color::DarkGray);
+        let placeholder = "No ONE.md found in this project.\n\nCreate ONE.md to document\nproject context for the AI.";
+        let content = self.onemed_content.as_deref().unwrap_or(placeholder);
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" ONE.md ")
+            .title_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .border_style(dim);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+
+        let paragraph = Paragraph::new(content)
+            .wrap(Wrap { trim: false })
+            .style(Style::default().fg(Color::White));
+        f.render_widget(paragraph, inner);
+    }
+
     fn draw_tabs(&self, f: &mut Frame, area: Rect) {
+        const BRAILLE: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+        let spinning = self.stream_started.is_some();
+        let frame = BRAILLE[self.spinner_tick as usize % BRAILLE.len()];
+        let selected = self.tabs.selected();
         let titles: Vec<Line> = self
             .tabs
             .titles()
             .iter()
-            .map(|t| Line::from(Span::styled(t.clone(), Style::default().fg(Color::White))))
+            .enumerate()
+            .map(|(i, t)| {
+                let label = if spinning && i == selected {
+                    format!("{frame} {t}")
+                } else {
+                    t.clone()
+                };
+                Line::from(Span::styled(label, Style::default().fg(Color::White)))
+            })
             .collect();
 
         let tabs = RatatuiTabs::new(titles)
@@ -2475,30 +2817,48 @@ impl App {
             Color::Cyan
         };
 
-        // Build title: " > ~/Projects/my-project " or " $ ~/Projects/my-project "
-        let prefix = if self.bash_mode { "$" } else { ">" };
-        let pwd = snapshot
+        // Get current branch if available
+        let branch = snapshot
             .active_session()
-            .map(|s| {
-                let path = &s.cwd;
-                if let Some(home) = dirs_next::home_dir() {
-                    let home_str = home.to_string_lossy();
-                    if path.starts_with(home_str.as_ref()) {
-                        return format!("~{}", &path[home_str.len()..]);
+            .and_then(|s| one_core::worktree::get_current_branch(&s.cwd));
+
+        // Build title differently for normal mode vs bash mode
+        let title = if self.bash_mode {
+            // Bash mode: PS1-like format with working directory and branch
+            let pwd = snapshot
+                .active_session()
+                .map(|s| {
+                    let path = &s.cwd;
+                    if let Some(home) = dirs_next::home_dir() {
+                        let home_str = home.to_string_lossy();
+                        if path.starts_with(home_str.as_ref()) {
+                            return format!("~{}", &path[home_str.len()..]);
+                        }
                     }
+                    path.clone()
+                })
+                .unwrap_or_default();
+
+            // Build the full prompt: "~/path (branch) $"
+            let branch_part = branch.as_ref().map(|b| format!(" ({})", b)).unwrap_or_default();
+            let mut full_title = format!("{}{} $", pwd, branch_part);
+
+            // Truncate to max 80 characters, preserving the branch at the end
+            if full_title.len() > 80 {
+                let max_path_len = 80_usize
+                    .saturating_sub(branch_part.len() + 2); // 2 for " $"
+                if max_path_len > 10 {
+                    let keep = (max_path_len - 3) / 2; // 3 for "..."
+                    let path_truncated = format!("{}...{}", &pwd[..keep], &pwd[pwd.len() - keep..]);
+                    full_title = format!("{}{} $", path_truncated, branch_part);
                 }
-                path.clone()
-            })
-            .unwrap_or_default();
-        // Truncate long paths: keep first and last parts, ... in the middle
-        let max_path = area.width.saturating_sub(8) as usize; // room for " > " + " " + borders
-        let pwd = if pwd.len() > max_path && max_path > 10 {
-            let keep = (max_path - 3) / 2; // 3 for "..."
-            format!("{}...{}", &pwd[..keep], &pwd[pwd.len() - keep..])
+            }
+            format!(" {} ", full_title)
         } else {
-            pwd
+            // Normal mode: just show branch
+            let branch_name = branch.as_deref().unwrap_or("unknown");
+            format!(" > ({}) ", branch_name)
         };
-        let title = format!(" {prefix} {pwd} ");
 
         let (display_text, text_style) = if let Some(ref placeholder) = self.input.placeholder {
             (placeholder.as_str(), Style::default().fg(Color::Yellow))
@@ -2857,5 +3217,54 @@ fn format_token_count(tokens: u64) -> String {
         format!("{}k", tokens / 1000)
     } else {
         format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    }
+}
+
+/// Derive a short (1-2 word) display title from the first AI response.
+/// Strips markdown, filters stop-words, title-cases the result.
+fn derive_tab_title(content: &str) -> String {
+    const STOP_WORDS: &[&str] = &[
+        "i", "a", "an", "the", "is", "are", "was", "were", "to", "of", "for", "in", "on", "at",
+        "by", "as", "be", "it", "do", "so", "or", "if", "no", "my", "we", "me", "he", "she",
+        "they", "you", "your", "this", "that", "with", "from", "not", "can", "will", "have",
+        "has", "had", "but", "and", "here", "let", "ll", "ve", "re", "s", "d", "m",
+    ];
+
+    // Strip markdown characters; keep alphanumeric, hyphens, spaces
+    let cleaned: String = content
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
+        .collect();
+
+    let words: Vec<String> = cleaned
+        .split_whitespace()
+        .filter(|w| {
+            let lw = w.to_lowercase();
+            w.len() > 2 && !STOP_WORDS.contains(&lw.as_str())
+        })
+        .take(2)
+        .map(|w| {
+            let mut chars = w.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect();
+
+    let title = words.join(" ");
+    if title.is_empty() {
+        // Fallback: truncate raw content
+        content.chars().take(12).collect::<String>().trim().to_string()
+    } else if title.len() > 20 {
+        title[..20].trim_end().to_string()
+    } else {
+        title
     }
 }
