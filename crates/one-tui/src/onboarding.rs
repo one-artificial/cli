@@ -8,21 +8,35 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Paragraph},
 };
 
 use one_core::config::AppConfig;
 
-// ── ASCII logo background ─────────────────────────────────────────
+// ── Owl artscape ─────────────────────────────────────────────────
 
-/// The One logo as ASCII art (from Pro.txt).
-const LOGO_ART: &str = include_str!("logo.txt");
+/// 12-line artscape: owl in the upper right, stars and clouds scattered.
+const ARTSCAPE: &[&str] = &[
+    "     *                                       \u{2584}\u{2593}\u{2588}\u{2588}\u{2593}\u{2584}",
+    "                                 *         \u{2584}\u{2588}\u{2591}\u{2584}\u{2593}\u{2593}\u{2584}\u{2591}\u{2588}\u{2584}",
+    "            \u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}                        \u{2588}\u{2593}  \u{2588}  \u{2588}  \u{2593}\u{2588}",
+    "    \u{2591}\u{2591}\u{2591}   \u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}                      \u{2588}\u{2592}   \u{2590}\u{258C}   \u{2592}\u{2588}",
+    "   \u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}    *               \u{2588}\u{2593}\u{2591}    \u{2591}\u{2593}\u{2588}",
+    "                                            \u{2580}\u{2588}\u{2588}\u{2593}\u{2593}\u{2588}\u{2588}\u{2580}",
+    " *                                 \u{2591}\u{2591}\u{2591}\u{2591}",
+    "                                 \u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}",
+    "                               \u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}\u{2591}",
+    "                                                        *",
+    "              *                          *",
+    "                       *",
+];
 
-/// Color stops for the logo gradient (matches Pro.png).
-/// Format: (row_fraction, r, g, b)
+// ── Gradient ─────────────────────────────────────────────────────
+
+/// Color stops for artscape gradient. Format: (row_fraction, r, g, b).
 const GRADIENT: &[(f32, u8, u8, u8)] = &[
     (0.00, 0x33, 0x88, 0xFF), // blue
     (0.25, 0x33, 0xCC, 0xFF), // cyan
@@ -36,7 +50,6 @@ const GRADIENT: &[(f32, u8, u8, u8)] = &[
 fn gradient_color(frac: f32, dim: f32) -> Color {
     let frac = frac.clamp(0.0, 1.0);
 
-    // Find the two stops we're between
     let mut lower = GRADIENT[0];
     let mut upper = GRADIENT[GRADIENT.len() - 1];
     for window in GRADIENT.windows(2) {
@@ -62,60 +75,121 @@ fn gradient_color(frac: f32, dim: f32) -> Color {
     )
 }
 
-/// Render the ASCII logo as a dimmed colored background filling the terminal.
-fn draw_logo_background(f: &mut Frame) {
-    let area = f.area();
-    let lines: Vec<&str> = LOGO_ART.lines().collect();
-    let total_rows = lines.len().max(1);
+// ── Theme options ────────────────────────────────────────────────
 
-    // Center the logo vertically and horizontally
-    let y_offset = if area.height as usize > total_rows {
-        (area.height as usize - total_rows) / 2
-    } else {
-        0
-    };
-
-    let mut styled_lines: Vec<Line<'static>> = Vec::new();
-
-    for row in 0..area.height as usize {
-        let logo_row = row.checked_sub(y_offset);
-        let w = area.width as usize;
-        if let Some(lr) = logo_row
-            && lr < total_rows
-        {
-            let line_text = lines[lr];
-            let frac = lr as f32 / total_rows as f32;
-            let color = gradient_color(frac, 0.35);
-
-            // Center horizontally
-            let text_len = line_text.len();
-            let left_pad = if w > text_len { (w - text_len) / 2 } else { 0 };
-
-            let mut spans = vec![];
-            if left_pad > 0 {
-                spans.push(Span::raw(" ".repeat(left_pad)));
-            }
-            spans.push(Span::styled(
-                line_text.to_string(),
-                Style::default().fg(color),
-            ));
-            styled_lines.push(Line::from(spans));
-            continue;
-        }
-        // Empty row (above or below the logo)
-        styled_lines.push(Line::from(""));
-    }
-
-    let paragraph = Paragraph::new(Text::from(styled_lines));
-    f.render_widget(paragraph, area);
+struct ThemeOption {
+    label: &'static str,
+    config_name: &'static str,
+    /// Screen background fill — the primary way the UI visibly shifts per theme.
+    bg: Color,
+    /// Primary text color on top of `bg`.
+    fg: Color,
+    /// Accent/highlight: header, separators, selected items.
+    accent: Color,
+    /// Diff addition color for the inline preview panel.
+    diff_add: Color,
+    /// Diff deletion color for the inline preview panel.
+    diff_remove: Color,
 }
 
-// ── Provider definitions ──────────────────────────────────────────
+const THEME_OPTIONS: &[ThemeOption] = &[
+    ThemeOption {
+        label: "Dark mode",
+        config_name: "dark",
+        bg: Color::Rgb(0x14, 0x16, 0x1A),
+        fg: Color::Rgb(0xDC, 0xDC, 0xDC),
+        accent: Color::Cyan,
+        diff_add: Color::Green,
+        diff_remove: Color::Red,
+    },
+    ThemeOption {
+        label: "Light mode",
+        config_name: "light",
+        bg: Color::Rgb(0xF5, 0xF5, 0xF5),
+        fg: Color::Rgb(0x1A, 0x1A, 0x1A),
+        accent: Color::Blue,
+        diff_add: Color::Green,
+        diff_remove: Color::Red,
+    },
+    ThemeOption {
+        label: "Dark mode (colorblind-friendly)",
+        config_name: "dark_colorblind",
+        bg: Color::Rgb(0x14, 0x16, 0x1A),
+        fg: Color::Rgb(0xDC, 0xDC, 0xDC),
+        accent: Color::Rgb(0x44, 0x88, 0xFF),
+        diff_add: Color::Rgb(0x44, 0x88, 0xFF),
+        diff_remove: Color::Rgb(0xFF, 0x88, 0x00),
+    },
+    ThemeOption {
+        label: "Light mode (colorblind-friendly)",
+        config_name: "light_colorblind",
+        bg: Color::Rgb(0xF5, 0xF5, 0xF5),
+        fg: Color::Rgb(0x1A, 0x1A, 0x1A),
+        accent: Color::Rgb(0x00, 0x88, 0xFF),
+        diff_add: Color::Rgb(0x00, 0x55, 0xCC),
+        diff_remove: Color::Rgb(0xCC, 0x66, 0x00),
+    },
+    ThemeOption {
+        label: "Dark mode (ANSI colors only)",
+        config_name: "dark_ansi",
+        bg: Color::Black,
+        fg: Color::White,
+        accent: Color::LightCyan,
+        diff_add: Color::LightGreen,
+        diff_remove: Color::LightRed,
+    },
+];
+
+// ── Syntax theme options ─────────────────────────────────────────
+
+struct SyntaxThemeOption {
+    label: &'static str,
+    config_name: &'static str,
+    keyword: Color,
+    string: Color,
+    /// Comment color — medium-darkness values chosen to be readable on both
+    /// dark and light backgrounds (avoids the near-white plain text problem).
+    comment: Color,
+}
+
+const SYNTAX_THEMES: &[SyntaxThemeOption] = &[
+    SyntaxThemeOption {
+        label: "Monokai",
+        config_name: "monokai",
+        keyword: Color::Rgb(0xF9, 0x26, 0x72),
+        string: Color::Rgb(0xE6, 0xDB, 0x74),
+        comment: Color::Rgb(0x75, 0x71, 0x5E),
+    },
+    SyntaxThemeOption {
+        label: "One Dark",
+        config_name: "one_dark",
+        keyword: Color::Rgb(0xC6, 0x78, 0xDD),
+        string: Color::Rgb(0x98, 0xC3, 0x79),
+        comment: Color::Rgb(0x5C, 0x63, 0x70),
+    },
+    SyntaxThemeOption {
+        label: "Dracula",
+        config_name: "dracula",
+        keyword: Color::Rgb(0xFF, 0x79, 0xC6),
+        string: Color::Rgb(0xF1, 0xFA, 0x8C),
+        comment: Color::Rgb(0x62, 0x72, 0xA4),
+    },
+    SyntaxThemeOption {
+        label: "Plain",
+        config_name: "plain",
+        keyword: Color::Gray,
+        string: Color::Gray,
+        comment: Color::DarkGray,
+    },
+];
+
+// ── Provider definitions ─────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Provider {
     Anthropic,
     OpenAi,
+    Google,
     Ollama,
     Skip,
 }
@@ -125,6 +199,7 @@ impl Provider {
         &[
             Provider::Anthropic,
             Provider::OpenAi,
+            Provider::Google,
             Provider::Ollama,
             Provider::Skip,
         ]
@@ -134,6 +209,7 @@ impl Provider {
         match self {
             Provider::Anthropic => "Anthropic (Claude)",
             Provider::OpenAi => "OpenAI (GPT)",
+            Provider::Google => "Google (Gemini)",
             Provider::Ollama => "Ollama (local, no auth)",
             Provider::Skip => "Skip for now",
         }
@@ -143,6 +219,7 @@ impl Provider {
         match self {
             Provider::Anthropic => "Best experience: thinking, prompt caching, extended context",
             Provider::OpenAi => "GPT-4o and o-series models",
+            Provider::Google => "Gemini models via AI Studio",
             Provider::Ollama => "Free, private, runs on your machine",
             Provider::Skip => "Auto-detect later, or use /login",
         }
@@ -152,6 +229,7 @@ impl Provider {
         match self {
             Provider::Anthropic => "anthropic",
             Provider::OpenAi => "openai",
+            Provider::Google => "google",
             Provider::Ollama => "ollama",
             Provider::Skip => "",
         }
@@ -161,19 +239,17 @@ impl Provider {
         match self {
             Provider::Anthropic => "claude-sonnet-4-20250514",
             Provider::OpenAi => "gpt-4o",
+            Provider::Google => "gemini-2.0-flash",
             Provider::Ollama => "llama3",
             Provider::Skip => "",
         }
     }
 
-    fn needs_api_key(&self) -> bool {
-        matches!(self, Provider::Anthropic | Provider::OpenAi)
-    }
-
-    fn env_var_name(&self) -> &'static str {
+    fn env_var(&self) -> &'static str {
         match self {
             Provider::Anthropic => "ANTHROPIC_API_KEY",
             Provider::OpenAi => "OPENAI_API_KEY",
+            Provider::Google => "GOOGLE_API_KEY",
             _ => "",
         }
     }
@@ -182,6 +258,7 @@ impl Provider {
         match self {
             Provider::Anthropic => "console.anthropic.com/settings/keys",
             Provider::OpenAi => "platform.openai.com/api-keys",
+            Provider::Google => "aistudio.google.com/apikey",
             _ => "",
         }
     }
@@ -194,28 +271,46 @@ impl Provider {
         }
     }
 
-    fn keychain_name(&self) -> &'static str {
+    fn needs_api_key(&self) -> bool {
+        matches!(
+            self,
+            Provider::Anthropic | Provider::OpenAi | Provider::Google
+        )
+    }
+
+    /// Check whether an API key already exists in the environment.
+    fn has_env_key(&self) -> bool {
+        let var = self.env_var();
+        !var.is_empty() && std::env::var(var).ok().filter(|v| !v.is_empty()).is_some()
+    }
+
+    /// Check whether a provider is configured (has an API key or is local).
+    fn is_configured(&self, config: &AppConfig) -> bool {
         match self {
-            Provider::Anthropic => "anthropic",
-            Provider::OpenAi => "openai",
-            _ => "",
+            Provider::Anthropic => {
+                self.has_env_key() || config.provider.anthropic.api_key.is_some()
+            }
+            Provider::OpenAi => self.has_env_key() || config.provider.openai.api_key.is_some(),
+            Provider::Google => self.has_env_key() || config.provider.google.api_key.is_some(),
+            Provider::Ollama => true, // Local, always available
+            Provider::Skip => true,   // Skip doesn't need configuration
         }
     }
 }
 
-// ── Onboarding steps ──────────────────────────────────────────────
+// ── Onboarding steps ─────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Step {
-    Welcome,
-    Identity,       // HF login — your account (optional)
-    ProviderSelect, // model auth — which AI to use
-    ApiKeyInput,    // API key for selected provider
+    ThemeSelect,
+    Login,
+    ProviderSelect,
+    ApiKeyInput,
     SecurityNote,
     Done,
 }
 
-// ── Public entry point ────────────────────────────────────────────
+// ── Public entry point ───────────────────────────────────────────
 
 /// Run the onboarding wizard in a standalone TUI.
 /// This completes fully before the chat UI is ever created.
@@ -228,7 +323,7 @@ pub async fn run_onboarding(config: &mut AppConfig) -> Result<()> {
 
     let result = onboarding_loop(&mut terminal, config).await;
 
-    // Clean exit: leave alternate screen so the chat UI starts completely fresh
+    // Clean exit: leave alternate screen so the chat UI starts fresh
     disable_raw_mode()?;
     crossterm::execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
@@ -236,14 +331,16 @@ pub async fn run_onboarding(config: &mut AppConfig) -> Result<()> {
     result
 }
 
-// ── Main loop ─────────────────────────────────────────────────────
+// ── Main loop ────────────────────────────────────────────────────
 
 async fn onboarding_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     config: &mut AppConfig,
 ) -> Result<()> {
-    let mut step = Step::Welcome;
+    let mut step = Step::ThemeSelect;
     let mut selected_idx: usize = 0;
+    let mut selected_syntax_idx: usize = 0;
+    let mut confirmed_theme_idx: usize = 0;
     let mut selected_provider = Provider::Skip;
     let mut api_key_buf = String::new();
     let mut cursor_blink = false;
@@ -252,29 +349,36 @@ async fn onboarding_loop(
     loop {
         let step_snap = step;
         let idx_snap = selected_idx;
+        let syntax_snap = selected_syntax_idx;
         let prov_snap = selected_provider;
         let key_snap = api_key_buf.clone();
         let blink = cursor_blink;
+        // Live theme preview: on the theme step use the hovered option's palette so
+        // the whole screen visibly shifts as the user navigates; after selection use
+        // the confirmed choice so subsequent steps match what was picked.
+        let preview_idx = if step_snap == Step::ThemeSelect {
+            idx_snap
+        } else {
+            confirmed_theme_idx
+        };
+        let bg_snap = THEME_OPTIONS[preview_idx].bg;
+        let fg_snap = THEME_OPTIONS[preview_idx].fg;
+        let accent_snap = THEME_OPTIONS[preview_idx].accent;
 
         terminal.draw(|f| {
-            // Layer 1: gradient-colored ASCII logo background
-            draw_logo_background(f);
-
-            // Layer 2: dialog card on top
-            match step_snap {
-                Step::Welcome => draw_welcome(f),
-                Step::Identity => draw_identity(f, idx_snap),
-                Step::ProviderSelect => draw_provider_select(f, idx_snap),
-                Step::ApiKeyInput => draw_api_key_dialog(f, prov_snap, &key_snap, blink),
-                Step::SecurityNote => draw_security_note(f),
-                Step::Done => draw_done(f),
-            }
+            draw_screen(
+                f,
+                step_snap,
+                idx_snap,
+                syntax_snap,
+                prov_snap,
+                &key_snap,
+                blink,
+                bg_snap,
+                fg_snap,
+                accent_snap,
+            );
         })?;
-
-        tick = tick.wrapping_add(1);
-        if tick.is_multiple_of(10) {
-            cursor_blink = !cursor_blink;
-        }
 
         if step == Step::Done {
             if event::poll(std::time::Duration::from_millis(1200))? {
@@ -283,19 +387,52 @@ async fn onboarding_loop(
             break;
         }
 
+        // Advance cursor blink
+        tick = tick.wrapping_add(1);
+        if tick.is_multiple_of(10) {
+            cursor_blink = !cursor_blink;
+        }
+
         if !event::poll(std::time::Duration::from_millis(50))? {
             continue;
         }
 
         if let CrosstermEvent::Key(key) = event::read()? {
             match step {
-                Step::Welcome => {
-                    if key.code == KeyCode::Enter {
-                        step = Step::Identity;
+                // ── Theme + syntax selection ─────────────────
+                Step::ThemeSelect => match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        selected_idx = selected_idx.saturating_sub(1);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if selected_idx < THEME_OPTIONS.len() - 1 {
+                            selected_idx += 1;
+                        }
+                    }
+                    KeyCode::Char('t') => {
+                        // Cycle syntax theme inline — preview updates immediately
+                        selected_syntax_idx = (selected_syntax_idx + 1) % SYNTAX_THEMES.len();
+                    }
+                    KeyCode::Enter => {
+                        let opt = &THEME_OPTIONS[selected_idx];
+                        config.ui.theme = opt.config_name.to_string();
+                        config.ui.colors =
+                            one_core::config::ThemeColors::for_theme(opt.config_name);
+                        config.ui.syntax_theme =
+                            SYNTAX_THEMES[selected_syntax_idx].config_name.to_string();
+                        confirmed_theme_idx = selected_idx;
+                        step = Step::Login;
                         selected_idx = 0;
                     }
-                }
-                Step::Identity => match key.code {
+                    KeyCode::Esc => {
+                        one_core::onboarding::mark_onboarding_complete(config)?;
+                        step = Step::Done;
+                    }
+                    _ => {}
+                },
+
+                // ── HF login ────────────────────────────────
+                Step::Login => match key.code {
                     KeyCode::Up | KeyCode::Char('k') => {
                         selected_idx = selected_idx.saturating_sub(1);
                     }
@@ -327,34 +464,56 @@ async fn onboarding_loop(
                             enable_raw_mode()?;
                             crossterm::execute!(terminal.backend_mut(), EnterAlternateScreen)?;
                         }
-                        // Either way, proceed to provider selection
                         step = Step::ProviderSelect;
                         selected_idx = 0;
                     }
+                    KeyCode::Esc => {
+                        one_core::onboarding::mark_onboarding_complete(config)?;
+                        step = Step::Done;
+                    }
                     _ => {}
                 },
+
+                // ── Provider selection ──────────────────────
                 Step::ProviderSelect => match key.code {
                     KeyCode::Up | KeyCode::Char('k') => {
                         selected_idx = selected_idx.saturating_sub(1);
                     }
                     KeyCode::Down | KeyCode::Char('j') => {
-                        let max = Provider::all().len().saturating_sub(1);
+                        // +1 for the "Continue →" entry at the bottom
+                        let max = Provider::all().len();
                         if selected_idx < max {
                             selected_idx += 1;
                         }
                     }
                     KeyCode::Enter => {
-                        selected_provider = Provider::all()[selected_idx];
-                        config.provider.default_provider =
-                            selected_provider.config_name().to_string();
-                        config.provider.default_model =
-                            selected_provider.default_model().to_string();
-
-                        if selected_provider.needs_api_key() {
-                            step = Step::ApiKeyInput;
-                            api_key_buf.clear();
-                        } else {
+                        let all = Provider::all();
+                        if selected_idx == all.len() {
+                            // "Continue →" — advance, picking first configured as default
+                            let first = all.iter().find(|p| p.is_configured(config));
+                            if let Some(p) = first
+                                && config.provider.default_provider.is_empty()
+                            {
+                                config.provider.default_provider = p.config_name().to_string();
+                                config.provider.default_model = p.default_model().to_string();
+                            }
                             step = Step::SecurityNote;
+                        } else {
+                            selected_provider = all[selected_idx];
+                            // Set as default provider on selection
+                            if !selected_provider.config_name().is_empty() {
+                                config.provider.default_provider =
+                                    selected_provider.config_name().to_string();
+                                config.provider.default_model =
+                                    selected_provider.default_model().to_string();
+                            }
+                            if selected_provider.needs_api_key()
+                                && !selected_provider.is_configured(config)
+                            {
+                                step = Step::ApiKeyInput;
+                                api_key_buf.clear();
+                            }
+                            // Already configured or local (Ollama/Skip): stay on this screen
                         }
                     }
                     KeyCode::Esc => {
@@ -363,6 +522,8 @@ async fn onboarding_loop(
                     }
                     _ => {}
                 },
+
+                // ── API key input ───────────────────────────
                 Step::ApiKeyInput => match key.code {
                     KeyCode::Char(c) => {
                         api_key_buf.push(c);
@@ -373,8 +534,8 @@ async fn onboarding_loop(
                     KeyCode::Enter => {
                         let trimmed = api_key_buf.trim().to_string();
                         if !trimmed.is_empty() {
-                            let name = selected_provider.keychain_name();
-                            let _ = one_core::credentials::CredentialStore::store(name, &trimmed);
+                            // Store in config file only — env vars are already resolved
+                            // directly so no keychain write needed.
                             match selected_provider {
                                 Provider::Anthropic => {
                                     config.provider.anthropic.api_key = Some(trimmed);
@@ -382,22 +543,30 @@ async fn onboarding_loop(
                                 Provider::OpenAi => {
                                     config.provider.openai.api_key = Some(trimmed);
                                 }
+                                Provider::Google => {
+                                    config.provider.google.api_key = Some(trimmed);
+                                }
                                 _ => {}
                             }
                         }
-                        step = Step::SecurityNote;
+                        // Return to provider list so user can configure more providers
+                        step = Step::ProviderSelect;
                     }
                     KeyCode::Esc => {
-                        step = Step::SecurityNote;
+                        // Cancelled — return to provider list without saving
+                        step = Step::ProviderSelect;
                     }
                     _ => {}
                 },
+
+                // ── Security note ───────────────────────────
                 Step::SecurityNote => {
-                    if key.code == KeyCode::Enter {
+                    if matches!(key.code, KeyCode::Enter | KeyCode::Esc) {
                         one_core::onboarding::mark_onboarding_complete(config)?;
                         step = Step::Done;
                     }
                 }
+
                 Step::Done => break,
             }
         }
@@ -406,77 +575,294 @@ async fn onboarding_loop(
     Ok(())
 }
 
-// ── Dialog drawing functions ──────────────────────────────────────
+// ── Screen layout ────────────────────────────────────────────────
 
-fn draw_welcome(f: &mut Frame) {
-    let dialog = dialog_rect(46, 14, f.area());
-    let block = dialog_block(" one ");
-    let inner = block.inner(dialog);
-    f.render_widget(Clear, dialog);
-    f.render_widget(block, dialog);
+#[allow(clippy::too_many_arguments)]
+fn draw_screen(
+    f: &mut Frame,
+    step: Step,
+    selected_idx: usize,
+    selected_syntax_idx: usize,
+    provider: Provider,
+    key_buf: &str,
+    cursor_blink: bool,
+    bg: Color,
+    fg: Color,
+    accent: Color,
+) {
+    let area = f.area();
+    let width = area.width as usize;
 
-    let lines = vec![
-        Line::from(""),
-        Line::from(dspan_bold("   ___  _  _ ___", Color::Cyan)),
-        Line::from(dspan_bold("  / _ \\| \\| | __|", Color::Cyan)),
-        Line::from(dspan_bold(" | (_) | .` | _|", Color::Cyan)),
-        Line::from(dspan_bold("  \\___/|_|\\_|___|", Color::Cyan)),
-        Line::from(""),
-        Line::from(dspan(" Your AI coding terminal.", Color::White)),
-        Line::from(dspan(" Multi-provider. Extensible.", Color::DarkGray)),
-        Line::from(""),
-        Line::from(""),
-        Line::from(dspan_bold(" Press Enter to get started", Color::Green)),
-    ];
+    // Only fill the bg on the theme selection step (live preview).
+    // On all other steps the terminal's own background is used to avoid
+    // banding artifacts from our bg color differing from the terminal default.
+    if step == Step::ThemeSelect {
+        f.render_widget(Block::default().style(Style::default().bg(bg)), area);
+    }
 
-    f.render_widget(paragraph(lines), inner);
+    let artscape_h = ARTSCAPE.len() as u16;
+    // header(1) + top_sep(1) + artscape + bot_sep(1) + content(min 8)
+    let show_artscape = area.height >= 3 + artscape_h + 8;
+
+    if show_artscape {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),          // header
+                Constraint::Length(1),          // top separator
+                Constraint::Length(artscape_h), // artscape
+                Constraint::Length(1),          // bottom separator
+                Constraint::Min(0),             // content
+            ])
+            .split(area);
+
+        draw_header(f, chunks[0], accent);
+        draw_separator(f, chunks[1], width, accent);
+        draw_artscape(f, chunks[2], width);
+        draw_separator(f, chunks[3], width, accent);
+        draw_content(
+            f,
+            chunks[4],
+            step,
+            selected_idx,
+            selected_syntax_idx,
+            provider,
+            key_buf,
+            cursor_blink,
+            fg,
+        );
+    } else {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // header
+                Constraint::Length(1), // separator
+                Constraint::Min(0),    // content
+            ])
+            .split(area);
+
+        draw_header(f, chunks[0], accent);
+        draw_separator(f, chunks[1], width, accent);
+        draw_content(
+            f,
+            chunks[2],
+            step,
+            selected_idx,
+            selected_syntax_idx,
+            provider,
+            key_buf,
+            cursor_blink,
+            fg,
+        );
+    }
 }
 
-fn draw_identity(f: &mut Frame, selected_idx: usize) {
-    let dialog = dialog_rect(52, 14, f.area());
-    let block = dialog_block(" sign in ");
-    let inner = block.inner(dialog);
-    f.render_widget(Clear, dialog);
-    f.render_widget(block, dialog);
+fn draw_header(f: &mut Frame, area: Rect, accent: Color) {
+    let version = env!("CARGO_PKG_VERSION");
+    let header = Paragraph::new(Line::from(dspan_bold(
+        format!("Welcome to One v{version}"),
+        accent,
+    )));
+    f.render_widget(header, area);
+}
 
-    let options = [
-        (
-            "Sign in with Hugging Face",
-            "Opens browser — unlocks integrations",
-        ),
+fn draw_artscape(f: &mut Frame, area: Rect, term_width: usize) {
+    let total = ARTSCAPE.len().max(1);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    for (i, art_line) in ARTSCAPE.iter().enumerate() {
+        let frac = i as f32 / total as f32;
+        let color = gradient_color(frac, 0.75);
+
+        let text_len = art_line.chars().count();
+        let left_pad = if term_width > text_len {
+            (term_width - text_len) / 2
+        } else {
+            0
+        };
+
+        let mut spans = vec![];
+        if left_pad > 0 {
+            spans.push(Span::raw(" ".repeat(left_pad)));
+        }
+        spans.push(Span::styled(
+            art_line.to_string(),
+            Style::default().fg(color),
+        ));
+        lines.push(Line::from(spans));
+    }
+
+    f.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+fn draw_separator(f: &mut Frame, area: Rect, width: usize, color: Color) {
+    let sep = Paragraph::new(Line::from(dspan("\u{2026}".repeat(width), color)));
+    f.render_widget(sep, area);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_content(
+    f: &mut Frame,
+    area: Rect,
+    step: Step,
+    selected_idx: usize,
+    selected_syntax_idx: usize,
+    provider: Provider,
+    key_buf: &str,
+    cursor_blink: bool,
+    fg: Color,
+) {
+    let lines = match step {
+        Step::ThemeSelect => theme_select_lines(selected_idx, selected_syntax_idx, fg),
+        Step::Login => login_lines(selected_idx),
+        Step::ProviderSelect => provider_select_lines(selected_idx),
+        Step::ApiKeyInput => api_key_input_lines(provider, key_buf, cursor_blink),
+        Step::SecurityNote => security_note_lines(),
+        Step::Done => done_lines(),
+    };
+    f.render_widget(Paragraph::new(Text::from(lines)), area);
+}
+
+// ── Content builders ─────────────────────────────────────────────
+
+fn theme_select_lines(
+    selected_theme_idx: usize,
+    selected_syntax_idx: usize,
+    fg: Color,
+) -> Vec<Line<'static>> {
+    let theme_opt = &THEME_OPTIONS[selected_theme_idx];
+    let syntax_opt = &SYNTAX_THEMES[selected_syntax_idx];
+
+    // ── Theme options ──────────────────────────────────────────────
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(dspan_bold(" Let's get started.", fg)),
+        Line::from(""),
+        Line::from(dspan(
+            " Choose the text style that looks best with your terminal",
+            fg,
+        )),
+        Line::from(dspan(" To change this later, run /theme", Color::DarkGray)),
+        Line::from(""),
+    ];
+
+    for (i, opt) in THEME_OPTIONS.iter().enumerate() {
+        if i == selected_theme_idx {
+            // ✓ in the theme's own accent — signals both cursor and live color preview
+            lines.push(Line::from(vec![
+                dspan_bold(" \u{2713} ", opt.accent),
+                dspan_bold(format!("{}. {}", i + 1, opt.label), opt.accent),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                dspan("   ", Color::DarkGray),
+                dspan(format!("{}. ", i + 1), Color::DarkGray),
+                dspan(opt.label.to_string(), opt.accent),
+            ]));
+        }
+    }
+
+    // ── Diff color preview (the main visual diff between themes) ───
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        dspan_bold(" + ", theme_opt.diff_add),
+        dspan("added line   ", theme_opt.diff_add),
+        dspan_bold(" - ", theme_opt.diff_remove),
+        dspan("removed line", theme_opt.diff_remove),
+    ]));
+
+    // ── Syntax-highlighted code snippet ───────────────────────────
+    // Plain text uses `fg` (the theme's primary text color) rather than the
+    // syntax theme's fixed plain color, so it stays readable on light backgrounds.
+    let kw = |s: &'static str| Span::styled(s, Style::default().fg(syntax_opt.keyword));
+    let str_s = |s: &'static str| Span::styled(s, Style::default().fg(syntax_opt.string));
+    let cmt = |s: &'static str| Span::styled(s, Style::default().fg(syntax_opt.comment));
+    let pl = |s: &'static str| Span::styled(s, Style::default().fg(fg));
+    let border = Style::default().fg(Color::DarkGray);
+
+    let code_lines: Vec<Line<'static>> = vec![
+        Line::from(vec![pl("  "), kw("function"), pl(" greet() {")]),
+        Line::from(vec![cmt("    // Say hello")]),
+        Line::from(vec![
+            pl("    "),
+            kw("const"),
+            pl(" msg = "),
+            str_s("\"Hello, Claude!\""),
+            pl(";"),
+        ]),
+        Line::from(vec![pl("    "), kw("return"), pl(" msg;")]),
+        Line::from(vec![pl("  }")]),
+    ];
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  \u{256D}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        border,
+    )));
+    for code_line in code_lines {
+        let mut spans = vec![Span::styled("  \u{2502} ", border)];
+        spans.extend(code_line.spans);
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::from(Span::styled(
+        "  \u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+        border,
+    )));
+    lines.push(Line::from(vec![
+        dspan("  Syntax theme: ", Color::DarkGray),
+        dspan_bold(syntax_opt.label.to_string(), syntax_opt.keyword),
+        dspan("  (t to cycle)", Color::DarkGray),
+    ]));
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        dspan_bold(" Enter ", Color::Green),
+        dspan("confirm  ", Color::DarkGray),
+        dspan_bold(" t ", theme_opt.accent),
+        dspan("cycle syntax theme", Color::DarkGray),
+    ]));
+
+    lines
+}
+
+fn login_lines(selected_idx: usize) -> Vec<Line<'static>> {
+    let options: &[(&str, &str)] = &[
+        ("Sign in with Hugging Face", "Opens browser for OAuth"),
         ("Skip for now", "Sign in later with /login"),
     ];
 
     let mut lines = vec![
         Line::from(""),
-        Line::from(dspan(" Your identity unlocks integrations.", Color::White)),
         Line::from(dspan(
-            " Model auth is configured in the next step.",
-            Color::DarkGray,
+            " One can be used with your Hugging Face account for AI inference",
+            Color::White,
         )),
+        Line::from(dspan(" and model access.", Color::White)),
+        Line::from(""),
+        Line::from(dspan(" Select login method:", Color::White)),
         Line::from(""),
     ];
 
     for (i, (label, hint)) in options.iter().enumerate() {
-        let is_sel = i == selected_idx;
-        if is_sel {
-            lines.push(Line::from(dspan_bold(format!(" > {label}"), Color::Cyan)));
-            lines.push(Line::from(dspan(format!("     {hint}"), Color::DarkGray)));
+        if i == selected_idx {
+            lines.push(Line::from(vec![
+                dspan_bold(" \u{276F} ", Color::Cyan),
+                dspan_bold(format!("{}. {label}", i + 1), Color::Cyan),
+                dspan(format!(" \u{00B7} {hint}"), Color::DarkGray),
+            ]));
         } else {
-            lines.push(Line::from(dspan(format!("   {label}"), Color::White)));
+            lines.push(Line::from(vec![
+                dspan(format!("   {}. {label}", i + 1), Color::White),
+                dspan(format!(" \u{00B7} {hint}"), Color::DarkGray),
+            ]));
         }
+        lines.push(Line::from(""));
     }
 
-    f.render_widget(paragraph(lines), inner);
+    lines
 }
 
-fn draw_provider_select(f: &mut Frame, selected_idx: usize) {
-    let dialog = dialog_rect(60, 18, f.area());
-    let block = dialog_block(" choose a provider ");
-    let inner = block.inner(dialog);
-    f.render_widget(Clear, dialog);
-    f.render_widget(block, dialog);
-
+fn provider_select_lines(selected_idx: usize) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::from(""),
         Line::from(dspan(
@@ -487,48 +873,58 @@ fn draw_provider_select(f: &mut Frame, selected_idx: usize) {
     ];
 
     for (i, provider) in Provider::all().iter().enumerate() {
+        let has_key = provider.has_env_key();
         let is_sel = i == selected_idx;
+
         if is_sel {
-            lines.push(Line::from(dspan_bold(
-                format!(" > {}", provider.label()),
-                Color::Cyan,
-            )));
+            let mut spans = vec![
+                dspan_bold(" \u{276F} ", Color::Cyan),
+                dspan_bold(format!("{}. {}", i + 1, provider.label()), Color::Cyan),
+            ];
+            if has_key {
+                spans.push(dspan(
+                    format!(" \u{00B7} \u{2713} found in {}", provider.env_var()),
+                    Color::Green,
+                ));
+            }
+            lines.push(Line::from(spans));
+            // Description on the next line for selected item
             lines.push(Line::from(dspan(
-                format!("     {}", provider.hint()),
+                format!("      {}", provider.hint()),
                 Color::DarkGray,
             )));
         } else {
-            lines.push(Line::from(dspan(
-                format!("   {}", provider.label()),
+            let mut spans = vec![dspan(
+                format!("   {}. {}", i + 1, provider.label()),
                 Color::White,
-            )));
+            )];
+            if has_key {
+                spans.push(dspan(
+                    format!(" \u{00B7} \u{2713} {}", provider.env_var()),
+                    Color::Green,
+                ));
+            }
+            lines.push(Line::from(spans));
         }
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(dspan(
-        " Add more anytime with /login",
+        " Add more providers anytime with /login",
         Color::DarkGray,
     )));
 
-    f.render_widget(paragraph(lines), inner);
+    lines
 }
 
-fn draw_api_key_dialog(f: &mut Frame, provider: Provider, key_buf: &str, cursor_blink: bool) {
-    let dialog = dialog_rect(56, 14, f.area());
-    let title = match provider {
-        Provider::Anthropic => " anthropic api key ",
-        Provider::OpenAi => " openai api key ",
-        _ => " api key ",
-    };
-    let block = dialog_block(title);
-    let inner = block.inner(dialog);
-    f.render_widget(Clear, dialog);
-    f.render_widget(block, dialog);
-
-    // Build masked key display: show prefix, mask rest, blinking cursor
+fn api_key_input_lines(
+    provider: Provider,
+    key_buf: &str,
+    cursor_blink: bool,
+) -> Vec<Line<'static>> {
+    // Masked key display: show prefix chars, mask the rest, blinking block cursor
     let display = if key_buf.is_empty() {
-        if cursor_blink { "\u{2588}" } else { " " }.to_string() // block cursor
+        if cursor_blink { "\u{2588}" } else { " " }.to_string()
     } else {
         let visible = key_buf.len().min(7);
         let prefix = &key_buf[..visible];
@@ -541,14 +937,18 @@ fn draw_api_key_dialog(f: &mut Frame, provider: Provider, key_buf: &str, cursor_
         }
     };
 
-    let lines = vec![
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(dspan_bold(
+            format!(" Enter your {} API key", provider.label()),
+            Color::White,
+        )),
         Line::from(""),
         Line::from(dspan(
             format!(" Get your key at {}", provider.key_url()),
             Color::DarkGray,
         )),
         Line::from(""),
-        // The text field — uses a slightly lighter bg to look like an input
         Line::from(vec![
             dspan("  ", Color::White),
             Span::styled(
@@ -557,133 +957,78 @@ fn draw_api_key_dialog(f: &mut Frame, provider: Provider, key_buf: &str, cursor_
             ),
         ]),
         Line::from(""),
-        Line::from(dspan(
-            format!(
-                " Prefix: {}     Stored in: OS keychain",
-                provider.key_prefix()
-            ),
-            Color::DarkGray,
-        )),
-        Line::from(dspan(
-            format!(" Or set {} in your shell", provider.env_var_name()),
-            Color::DarkGray,
-        )),
-        Line::from(""),
-        Line::from(""),
-        Line::from(vec![
-            dspan_bold(" Enter ", Color::Green),
-            dspan("confirm  ", Color::DarkGray),
-            dspan_bold(" Esc ", Color::Yellow),
-            dspan("skip", Color::DarkGray),
-        ]),
     ];
 
-    f.render_widget(paragraph(lines), inner);
+    let prefix = provider.key_prefix();
+    if !prefix.is_empty() {
+        lines.push(Line::from(dspan(
+            format!(" Prefix: {prefix}     Stored in: OS keychain"),
+            Color::DarkGray,
+        )));
+    } else {
+        lines.push(Line::from(dspan(
+            " Stored in: OS keychain",
+            Color::DarkGray,
+        )));
+    }
+
+    lines.push(Line::from(dspan(
+        format!(" Or set {} in your shell", provider.env_var()),
+        Color::DarkGray,
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        dspan_bold(" Enter ", Color::Green),
+        dspan("confirm  ", Color::DarkGray),
+        dspan_bold(" Esc ", Color::Yellow),
+        dspan("skip", Color::DarkGray),
+    ]));
+
+    lines
 }
 
-fn draw_security_note(f: &mut Frame) {
-    let dialog = dialog_rect(54, 14, f.area());
-    let block = dialog_block(" before you start ");
-    let inner = block.inner(dialog);
-    f.render_widget(Clear, dialog);
-    f.render_widget(block, dialog);
-
-    let lines = vec![
+fn security_note_lines() -> Vec<Line<'static>> {
+    vec![
         Line::from(""),
+        Line::from(dspan_bold(" Security notes:", Color::White)),
+        Line::from(""),
+        Line::from(dspan_bold(" 1. AI can make mistakes", Color::Yellow)),
         Line::from(dspan(
-            " One can read, write, and execute code.",
+            "    You should always review AI responses, especially when",
+            Color::DarkGray,
+        )),
+        Line::from(dspan("    running code.", Color::DarkGray)),
+        Line::from(""),
+        Line::from(dspan_bold(
+            " 2. Due to prompt injection risks, only use it with code you trust",
             Color::Yellow,
         )),
-        Line::from(""),
+        Line::from(dspan("    For more details see:", Color::DarkGray)),
         Line::from(dspan(
-            " \u{2022} Tool calls require your approval",
-            Color::DarkGray,
-        )),
-        Line::from(dspan(
-            " \u{2022} Shell commands run in your terminal",
-            Color::DarkGray,
-        )),
-        Line::from(dspan(
-            " \u{2022} Files must be read before editing",
-            Color::DarkGray,
-        )),
-        Line::from(dspan(
-            " \u{2022} Credentials stay in your OS keychain",
-            Color::DarkGray,
+            "    https://github.com/one-artificial/cli",
+            Color::Cyan,
         )),
         Line::from(""),
-        Line::from(dspan(
-            " /permissions to configure  |  /help for commands",
-            Color::DarkGray,
-        )),
-        Line::from(""),
-        Line::from(""),
-        Line::from(dspan_bold(" Press Enter to start", Color::Green)),
-    ];
-
-    f.render_widget(paragraph(lines), inner);
+        Line::from(dspan_bold(" Press Enter to continue\u{2026}", Color::Green)),
+    ]
 }
 
-fn draw_done(f: &mut Frame) {
-    let dialog = dialog_rect(36, 6, f.area());
-    let block = dialog_block(" ready ");
-    let inner = block.inner(dialog);
-    f.render_widget(Clear, dialog);
-    f.render_widget(block, dialog);
-
-    let lines = vec![
+fn done_lines() -> Vec<Line<'static>> {
+    vec![
         Line::from(""),
-        Line::from(dspan_bold(" Starting One...", Color::Green)),
-    ];
-
-    f.render_widget(paragraph(lines), inner);
+        Line::from(dspan_bold(" Starting One\u{2026}", Color::Green)),
+    ]
 }
 
-// ── Helpers ───────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────
 
-/// Build a styled span.
 fn dspan(text: impl Into<String>, fg: Color) -> Span<'static> {
     Span::styled(text.into(), Style::default().fg(fg))
 }
 
-/// Bold variant.
 fn dspan_bold(text: impl Into<String>, fg: Color) -> Span<'static> {
     Span::styled(
         text.into(),
         Style::default().fg(fg).add_modifier(Modifier::BOLD),
     )
-}
-
-fn paragraph(lines: Vec<Line<'static>>) -> Paragraph<'static> {
-    Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false })
-}
-
-fn dialog_block(title: &str) -> Block<'_> {
-    Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .title(title)
-        .title_alignment(Alignment::Center)
-        .border_style(Style::default().fg(Color::Rgb(0x33, 0xCC, 0xFF)))
-}
-
-/// Create a centered dialog rectangle with fixed character dimensions.
-fn dialog_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let vert = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(height.min(area.height)),
-            Constraint::Min(0),
-        ])
-        .split(area);
-
-    Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(width.min(area.width)),
-            Constraint::Min(0),
-        ])
-        .split(vert[1])[1]
 }

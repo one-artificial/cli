@@ -30,3 +30,4 @@ rand.workspace = true
 futures-util.workspace = true
 crossterm.workspace = true
 url = "= 2.5.4"
+once_cell.workspace = true

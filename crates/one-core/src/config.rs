@@ -64,9 +64,16 @@ pub struct UiConfig {
     pub line_numbers: bool,
     /// Theme preset: "dark" (default), "light", "custom"
     pub theme: String,
+    /// Syntax highlighting theme for code blocks
+    #[serde(default = "default_syntax_theme")]
+    pub syntax_theme: String,
     /// Custom theme colors (used when theme = "custom")
     #[serde(default)]
     pub colors: ThemeColors,
+}
+
+fn default_syntax_theme() -> String {
+    "monokai".to_string()
 }
 
 /// Customizable TUI colors. Each field accepts a color name
@@ -131,11 +138,61 @@ impl ThemeColors {
         }
     }
 
+    /// Dark theme adjusted for red-green color blindness.
+    /// Uses blue/orange instead of green/red for diffs and errors.
+    pub fn dark_colorblind() -> Self {
+        Self {
+            user_text: "white".into(),
+            assistant_text: "white".into(),
+            tool_call: "cyan".into(),
+            error: "#FF8800".into(),
+            border: "gray".into(),
+            highlight: "cyan".into(),
+            muted: "gray".into(),
+            diff_add: "#4488FF".into(),
+            diff_remove: "#FF8800".into(),
+        }
+    }
+
+    /// Light theme adjusted for red-green color blindness.
+    pub fn light_colorblind() -> Self {
+        Self {
+            user_text: "black".into(),
+            assistant_text: "black".into(),
+            tool_call: "blue".into(),
+            error: "#CC6600".into(),
+            border: "gray".into(),
+            highlight: "blue".into(),
+            muted: "gray".into(),
+            diff_add: "#0055CC".into(),
+            diff_remove: "#CC6600".into(),
+        }
+    }
+
+    /// Dark theme using only ANSI 16 colors (no RGB).
+    /// For terminals without 24-bit color support.
+    pub fn dark_ansi() -> Self {
+        Self {
+            user_text: "white".into(),
+            assistant_text: "white".into(),
+            tool_call: "light_cyan".into(),
+            error: "light_red".into(),
+            border: "gray".into(),
+            highlight: "light_cyan".into(),
+            muted: "gray".into(),
+            diff_add: "light_green".into(),
+            diff_remove: "light_red".into(),
+        }
+    }
+
     /// Get the appropriate colors for a theme preset.
     pub fn for_theme(name: &str) -> Self {
         match name {
             "light" => Self::light(),
-            "custom" => Self::default(), // custom uses whatever's in the config
+            "dark_colorblind" => Self::dark_colorblind(),
+            "light_colorblind" => Self::light_colorblind(),
+            "dark_ansi" => Self::dark_ansi(),
+            "custom" => Self::default(),
             _ => Self::dark(),
         }
     }
@@ -210,6 +267,7 @@ impl Default for UiConfig {
         Self {
             line_numbers: true,
             theme: "dark".to_string(),
+            syntax_theme: "monokai".to_string(),
             colors: ThemeColors::default(),
         }
     }
