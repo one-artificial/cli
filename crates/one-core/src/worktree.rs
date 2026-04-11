@@ -4,6 +4,26 @@
 //! copy of the repo without affecting the main working directory.
 
 use anyhow::{Context, Result};
+use std::process::Command;
+
+/// Get the current git branch name for a directory.
+/// Returns the branch name (e.g., "main", "feature/foo") or None if not in a git repo.
+pub fn get_current_branch(work_dir: &str) -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(work_dir)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !branch.is_empty() {
+            return Some(branch);
+        }
+    }
+
+    None
+}
 
 /// Create a temporary git worktree for an agent.
 /// Returns (worktree_path, branch_name).

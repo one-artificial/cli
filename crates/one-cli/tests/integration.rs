@@ -42,6 +42,7 @@ async fn test_full_query_pipeline() {
                     working_dir,
                     session_id: String::new(),
                     read_files,
+                    db_path: None,
                 };
                 match registry.get(&name) {
                     Some(tool) => match tool.execute(input, &ctx).await {

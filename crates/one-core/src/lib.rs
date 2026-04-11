@@ -6,6 +6,7 @@ pub mod credentials;
 pub mod cron;
 pub mod effort;
 pub mod event;
+pub mod evergreen;
 pub mod import;
 pub mod keybindings;
 pub mod mcp;

@@ -1,3 +1,5 @@
+mod tasks;
+
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -293,6 +295,7 @@ async fn main() -> Result<()> {
         model: model.to_string(),
         max_tokens,
         temperature: None,
+        budget_tokens: None,
     };
 
     // Resolve API key: keyring (incl. OAuth tokens) → config file → env var
@@ -609,6 +612,7 @@ async fn main() -> Result<()> {
                         working_dir: cwd_for_tools.clone(),
                         session_id: String::new(),
                         read_files: read_files.clone(),
+                        db_path: None,
                     };
                     match tool_registry.get(&tc.name) {
                         Some(tool) => match tool.execute(tc.input.clone(), &ctx).await {
@@ -725,17 +729,31 @@ async fn main() -> Result<()> {
     let ai_provider = one_ai::create_provider_with_tools(provider, api_key, tool_schemas.clone());
 
     let registry_for_executor = tool_registry.clone();
+    let state_for_ctx = state.clone();
     let read_files: std::sync::Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     let tool_executor: one_core::query_engine::ToolExecutor = Arc::new(
         move |name: String, input: serde_json::Value, working_dir: String| {
             let registry = registry_for_executor.clone();
             let read_files = read_files.clone();
+            let state_ctx = state_for_ctx.clone();
             Box::pin(async move {
+                // Resolve session_id and db_path from the currently active session.
+                let (session_id, db_path) = {
+                    let s = state_ctx.read().await;
+                    let active_id = s.active_session_id.clone().unwrap_or_default();
+                    let db_path = s
+                        .sessions
+                        .get(&active_id)
+                        .map(|sess| sess.db_path.clone())
+                        .filter(|p| !p.as_os_str().is_empty());
+                    (active_id, db_path)
+                };
                 let ctx = one_tools::ToolContext {
                     working_dir,
-                    session_id: String::new(),
+                    session_id,
                     read_files,
+                    db_path,
                 };
                 match registry.get(&name) {
                     Some(tool) => match tool.execute(input, &ctx).await {
@@ -764,82 +782,208 @@ async fn main() -> Result<()> {
         cli.project.clone()
     };
 
+    // Show recent sessions for the first project before TUI launches.
+    // Printed to stderr so it's visible briefly before the TUI takes over.
+    {
+        let first_project = projects.first().map(String::as_str).unwrap_or(".");
+        let branch = one_core::worktree::get_current_branch(first_project)
+            .unwrap_or_else(|| "main".to_string());
+        if let Ok(sessions) = one_db::StoragePaths::list_sessions(first_project, &branch) {
+            if !sessions.is_empty() {
+                eprintln!("Recent sessions on {}:", branch);
+                for (i, s) in sessions.iter().take(5).enumerate() {
+                    let d = &s.opened_at; // YYYY_MM_DD_HH_MM_SS
+                    let dt_display = if d.len() >= 16 {
+                        format!(
+                            "{}-{}-{} {}:{}",
+                            d.get(0..4).unwrap_or(""),
+                            d.get(5..7).unwrap_or(""),
+                            d.get(8..10).unwrap_or(""),
+                            d.get(11..13).unwrap_or(""),
+                            d.get(14..16).unwrap_or(""),
+                        )
+                    } else {
+                        d.to_string()
+                    };
+                    let label = if i == 0 { " ← most recent" } else { "" };
+                    eprintln!("  [{}]  {}{}", s.session_hash, dt_display, label);
+                }
+                eprintln!("Resume with: one --session <hash>");
+                eprintln!();
+            }
+        }
+    }
+
     // Initialize sessions
     //   Default: new session (clean slate)
     //   --continue / -c: resume last session for each project
-    //   --session <id>: resume a specific session by ID
+    //   --session <hash>: resume a specific session by its 6-char hash
     {
         let mut app_state = state.write().await;
         app_state.config = config.clone();
 
-        // If --session was provided, detect backend and restore
-        if let Some(ref session_id) = cli.session {
-            let backend = one_core::storage::StorageBackend::detect(session_id);
-            let project_path = projects.first().cloned().unwrap_or_else(|| ".".to_string());
-
-            let mut session = Session::new(project_path, model_config.clone());
-            session.id = session_id.clone();
-
-            // Load from the appropriate backend
-            match &backend {
-                one_core::storage::StorageBackend::ClaudeCode { .. }
-                | one_core::storage::StorageBackend::Codex { .. } => {
-                    match backend.load(session_id) {
-                        Ok(conv) => {
-                            session.conversation = conv;
-                        }
-                        Err(e) => {
-                            eprintln!("Warning: failed to load session: {e}");
-                        }
-                    }
+        // Helper: create a new session with filesystem storage paths attached.
+        // Takes explicit parameters so it captures nothing from the outer scope.
+        let make_new_session = |project_path: &str, mc: &ModelConfig| -> Session {
+            let branch = one_core::worktree::get_current_branch(project_path)
+                .unwrap_or_else(|| "main".to_string());
+            match one_db::StoragePaths::for_new_session(project_path, &branch) {
+                Ok(paths) => {
+                    let _ = std::fs::create_dir_all(&paths.session_dir);
+                    Session::new(project_path.to_string(), mc.clone()).with_storage_info(
+                        paths.session_db,
+                        paths.session_hash,
+                        paths.branch,
+                    )
                 }
-                one_core::storage::StorageBackend::Native => {
-                    // Load from SQLite
-                    if let Ok(messages) = db.lock().unwrap().load_messages(session_id) {
-                        for msg in messages {
-                            let role = match msg.role.as_str() {
-                                "user" => one_core::conversation::TurnRole::User,
-                                "assistant" => one_core::conversation::TurnRole::Assistant,
-                                _ => continue,
-                            };
-                            session.conversation.turns.push(
-                                one_core::conversation::ConversationTurn {
-                                    role,
-                                    content: msg.content,
-                                    timestamp: msg
-                                        .created_at
-                                        .parse()
-                                        .unwrap_or_else(|_| chrono::Utc::now()),
-                                    tool_calls: Vec::new(),
-                                    is_streaming: false,
-                                    tokens_used: None,
-                                },
-                            );
-                        }
-                    }
+                Err(e) => {
+                    tracing::warn!("StoragePaths init failed: {e}");
+                    Session::new(project_path.to_string(), mc.clone())
                 }
             }
+        };
 
-            let backend_name = match &backend {
-                one_core::storage::StorageBackend::ClaudeCode { .. } => " (Claude Code)",
-                one_core::storage::StorageBackend::Codex { .. } => " (Codex)",
-                one_core::storage::StorageBackend::Native => "",
-            };
+        // If --session was provided: 6-char hash → new-style lookup; longer → legacy UUID fallback
+        if let Some(ref session_hash) = cli.session {
+            let project_path = projects.first().cloned().unwrap_or_else(|| ".".to_string());
+            let is_short_hash = session_hash.len() <= 8;
 
-            let turn_count = session.conversation.turns.len();
-            let project_name = session.project_name.clone();
-            app_state.sessions.insert(session_id.clone(), session);
-            app_state.active_session_id = Some(session_id.clone());
+            if is_short_hash {
+                // New-style: locate by 6-char hash under ~/.one/{project}/
+                let found = match one_db::StoragePaths::for_existing_session(
+                    &project_path,
+                    session_hash,
+                ) {
+                    Ok(Some(paths)) => Some(paths),
+                    Ok(None) => {
+                        eprintln!(
+                            "No session found with hash '{session_hash}'. Starting fresh."
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        eprintln!("Error looking up session: {e}. Starting fresh.");
+                        None
+                    }
+                };
 
-            let _ = event_bus.sender().send(Event::SessionCreated {
-                session_id: session_id.clone(),
-                project: format!("{project_name}{backend_name} ({turn_count} turns)"),
-            });
+                let session = if let Some(ref paths) = found {
+                    // Resume: load messages from per-session SQLite DB
+                    let mut s =
+                        Session::new(project_path.clone(), model_config.clone()).with_storage_info(
+                            paths.session_db.clone(),
+                            paths.session_hash.clone(),
+                            paths.branch.clone(),
+                        );
+                    if let Ok(session_db) = one_db::SessionDb::open(&paths.session_db) {
+                        if let Ok(messages) = session_db.load_messages(None, None, true) {
+                            for msg in messages {
+                                let role = match msg.role.as_str() {
+                                    "user" => one_core::conversation::TurnRole::User,
+                                    "assistant" => one_core::conversation::TurnRole::Assistant,
+                                    _ => continue,
+                                };
+                                s.conversation.turns.push(
+                                    one_core::conversation::ConversationTurn {
+                                        role,
+                                        content: msg.content,
+                                        timestamp: msg
+                                            .created_at
+                                            .parse()
+                                            .unwrap_or_else(|_| chrono::Utc::now()),
+                                        tool_calls: Vec::new(),
+                                        is_streaming: false,
+                                        tokens_used: None,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    s
+                } else {
+                    make_new_session(&project_path, &model_config)
+                };
+
+                let turn_count = session.conversation.turns.len();
+                let project_name = session.project_name.clone();
+                let sid = session.id.clone();
+                app_state.sessions.insert(sid.clone(), session);
+                app_state.active_session_id = Some(sid.clone());
+                let _ = event_bus.sender().send(Event::SessionCreated {
+                    session_id: sid,
+                    project: if turn_count > 0 {
+                        format!("{project_name} ({turn_count} turns)")
+                    } else {
+                        project_name
+                    },
+                });
+            } else {
+                // Legacy: full UUID or external session ID — preserve existing behavior
+                let backend = one_core::storage::StorageBackend::detect(session_hash);
+
+                let mut session = Session::new(project_path, model_config.clone());
+                session.id = session_hash.clone();
+
+                match &backend {
+                    one_core::storage::StorageBackend::ClaudeCode { .. }
+                    | one_core::storage::StorageBackend::Codex { .. }
+                    | one_core::storage::StorageBackend::Gemini { .. } => {
+                        match backend.load(session_hash) {
+                            Ok(conv) => {
+                                session.conversation = conv;
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: failed to load session: {e}");
+                            }
+                        }
+                    }
+                    one_core::storage::StorageBackend::Native => {
+                        if let Ok(messages) = db.lock().unwrap().load_messages(session_hash) {
+                            for msg in messages {
+                                let role = match msg.role.as_str() {
+                                    "user" => one_core::conversation::TurnRole::User,
+                                    "assistant" => one_core::conversation::TurnRole::Assistant,
+                                    _ => continue,
+                                };
+                                session.conversation.turns.push(
+                                    one_core::conversation::ConversationTurn {
+                                        role,
+                                        content: msg.content,
+                                        timestamp: msg
+                                            .created_at
+                                            .parse()
+                                            .unwrap_or_else(|_| chrono::Utc::now()),
+                                        tool_calls: Vec::new(),
+                                        is_streaming: false,
+                                        tokens_used: None,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                }
+
+                let backend_name = match &backend {
+                    one_core::storage::StorageBackend::ClaudeCode { .. } => " (Claude Code)",
+                    one_core::storage::StorageBackend::Codex { .. } => " (Codex)",
+                    one_core::storage::StorageBackend::Gemini { .. } => " (Gemini)",
+                    one_core::storage::StorageBackend::Native => "",
+                };
+
+                let turn_count = session.conversation.turns.len();
+                let project_name = session.project_name.clone();
+                app_state.sessions.insert(session_hash.clone(), session);
+                app_state.active_session_id = Some(session_hash.clone());
+                let _ = event_bus.sender().send(Event::SessionCreated {
+                    session_id: session_hash.clone(),
+                    project: format!("{project_name}{backend_name} ({turn_count} turns)"),
+                });
+            }
         } else {
             // Normal mode: one session per project path
             for project_path in &projects {
                 let (session, restored) = if cli.continue_session {
-                    // --continue: try to restore last session
+                    // --continue: try to restore last session from legacy DB
                     let existing = db
                         .lock()
                         .unwrap()
@@ -848,7 +992,7 @@ async fn main() -> Result<()> {
                         .flatten();
 
                     if let Some(record) = existing {
-                        let mut session = Session::new(project_path.clone(), model_config.clone());
+                        let mut session = make_new_session(project_path, &model_config);
                         session.id = record.id;
 
                         if let Ok(messages) = db.lock().unwrap().load_messages(&session.id) {
@@ -875,26 +1019,20 @@ async fn main() -> Result<()> {
                         }
                         (session, true)
                     } else {
-                        (
-                            Session::new(project_path.clone(), model_config.clone()),
-                            false,
-                        )
+                        (make_new_session(project_path, &model_config), false)
                     }
                 } else {
                     // Default: always new session
-                    (
-                        Session::new(project_path.clone(), model_config.clone()),
-                        false,
-                    )
+                    (make_new_session(project_path, &model_config), false)
                 };
 
-                // Also create JSONL transcript file (dual-write)
+                // Also create JSONL transcript file (dual-write for import round-trips)
                 let _ = one_core::storage::create_claude_code_session(
                     &session.id,
                     &session.project_path,
                 );
 
-                // Save session to DB
+                // Save to legacy DB (strangler-fig: kept alive until full migration)
                 let _ = db.lock().unwrap().save_session(&one_db::SessionRecord {
                     id: session.id.clone(),
                     project_path: session.project_path.clone(),
@@ -949,6 +1087,17 @@ async fn main() -> Result<()> {
                         // Also write to JSONL transcript
                         let s = state_persist.read().await;
                         if let Some(session) = s.sessions.get(&session_id) {
+                            // Dual-write to per-session SQLite DB (new-style sessions only)
+                            if !session.db_path.as_os_str().is_empty() {
+                                let db_path_w = session.db_path.clone();
+                                let content_w = content.clone();
+                                let now_w = chrono::Utc::now().to_rfc3339();
+                                tokio::task::spawn_blocking(move || {
+                                    if let Ok(db) = one_db::SessionDb::open(&db_path_w) {
+                                        let _ = db.save_message("user", &content_w, &now_w, None);
+                                    }
+                                });
+                            }
                             let backend = one_core::storage::StorageBackend::detect(&session_id);
                             if let one_core::storage::StorageBackend::ClaudeCode { .. } = backend {
                                 let turn = one_core::conversation::ConversationTurn {
@@ -999,6 +1148,21 @@ async fn main() -> Result<()> {
                                 &last.content,
                                 &last.timestamp.to_rfc3339(),
                             );
+
+                            // Dual-write to per-session SQLite DB (new-style sessions only)
+                            if !session.db_path.as_os_str().is_empty() {
+                                let db_path_w = session.db_path.clone();
+                                let content_w = last.content.clone();
+                                let ts_w = last.timestamp.to_rfc3339();
+                                let tokens_w = last.tokens_used.map(|t| t as i64);
+                                tokio::task::spawn_blocking(move || {
+                                    if let Ok(db) = one_db::SessionDb::open(&db_path_w) {
+                                        let _ = db.save_message(
+                                            "assistant", &content_w, &ts_w, tokens_w,
+                                        );
+                                    }
+                                });
+                            }
 
                             // Also write to JSONL transcript
                             let backend = one_core::storage::StorageBackend::detect(&session_id);
@@ -1117,6 +1281,10 @@ async fn main() -> Result<()> {
     // Load hooks from settings.json
     let hooks = one_core::settings::load_hooks(&first_project);
 
+    // Clone for the Evergreen background task before the engine consumes these values.
+    let evergreen_provider = ai_provider.clone();
+    let evergreen_config = model_config.clone();
+
     // Spawn the query engine with tools + MCP + permissions + hooks
     let engine = QueryEngine::new(state.clone(), ai_provider, model_config, event_bus.sender())
         .with_tools(all_tool_schemas, tool_executor)
@@ -1127,9 +1295,40 @@ async fn main() -> Result<()> {
 
     let _engine_handle = engine.spawn();
 
+    // Spawn the Evergreen background compression task.
+    // Wakes on each completed AI response turn, compresses eligible history spans,
+    // and writes results to the per-session SQLite DB.
+    let _evergreen_handle = tasks::evergreen::spawn(
+        state.clone(),
+        event_bus.sender(),
+        evergreen_provider,
+        evergreen_config,
+    );
+
     // Launch TUI
-    let mut app = App::new(state, event_bus.sender());
+    let mut app = App::new(state.clone(), event_bus.sender());
     app.run().await?;
+
+    // Print session hash(es) so the user can resume with `one --session <hash>`
+    {
+        let s = state.read().await;
+        let hashes: Vec<String> = s
+            .sessions
+            .values()
+            .filter(|sess| !sess.session_hash.is_empty())
+            .map(|sess| sess.session_hash.clone())
+            .collect();
+        if !hashes.is_empty() {
+            if hashes.len() == 1 {
+                eprintln!("Session: [{}]  resume with: one --session {}", hashes[0], hashes[0]);
+            } else {
+                eprintln!("Sessions ended:");
+                for h in &hashes {
+                    eprintln!("  [{}]  one --session {}", h, h);
+                }
+            }
+        }
+    }
 
     Ok(())
 }
