@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "▶ fmt"
+cargo fmt --check || {
+  echo "  ✗ cargo fmt --check failed — run 'cargo fmt' to fix"
+  exit 1
+}
+
+echo "▶ clippy"
+cargo clippy --quiet -- -D warnings || {
+  echo "  ✗ cargo clippy failed"
+  exit 1
+}
+
+echo "▶ check"
+cargo check --quiet || {
+  echo "  ✗ cargo check failed"
+  exit 1
+}
+
+echo "✓ all checks passed"

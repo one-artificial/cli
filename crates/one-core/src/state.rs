@@ -28,6 +28,8 @@ pub struct AppState {
     pub quitting: bool,
     /// Plan mode: tools are described but not executed
     pub plan_mode: bool,
+    /// Debug mode: show background subsystem activity as muted lines in chat
+    pub debug_mode: bool,
     /// Session-scoped task manager
     pub tasks: crate::tasks::TaskManager,
     /// Pending permission prompt: the query engine is waiting for user input.

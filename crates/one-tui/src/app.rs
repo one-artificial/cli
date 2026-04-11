@@ -89,6 +89,11 @@ pub struct App {
     thinking_verb_idx: usize,
     /// Index into tips — rotates every ~8 seconds
     tip_idx: usize,
+    /// When the current tool execution started (for elapsed time display)
+    tool_exec_started: Option<std::time::Instant>,
+    /// Which processing-dot animation style is active for the current tool (0–3).
+    /// Picked from spinner_tick when ToolRequest fires so it varies between calls.
+    processing_dot_style: usize,
     /// Bash mode — triggered by typing '!', input is a shell command
     bash_mode: bool,
     /// Show inline help when user types '?' alone
@@ -126,6 +131,8 @@ impl App {
             spinner_tick: 0,
             close_confirm: false,
             stream_started: None,
+            tool_exec_started: None,
+            processing_dot_style: 0,
             thinking_verb_idx: 0,
             tip_idx: 0,
             bash_mode: false,
@@ -258,9 +265,13 @@ impl App {
                             self.pet.on_response_start();
                             if self.stream_started.is_none() {
                                 self.stream_started = Some(std::time::Instant::now());
-                                // Pick new random-ish verb and tip for this stream
+                                // Pick new random-ish verb, tip, and dot style for this stream
                                 self.thinking_verb_idx = self.spinner_tick as usize;
                                 self.tip_idx = (self.spinner_tick as usize).wrapping_mul(7);
+                                self.processing_dot_style = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.subsec_nanos() as usize)
+                                    .unwrap_or(self.spinner_tick as usize);
                             }
                         }
                     }
@@ -334,6 +345,11 @@ impl App {
                         }
 
                         // Store on the LAST assistant turn so it renders per-turn
+                        self.tool_exec_started = Some(std::time::Instant::now());
+                        self.processing_dot_style = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.subsec_nanos() as usize)
+                            .unwrap_or(self.spinner_tick as usize);
                         let mut state = self.state.write().await;
                         if let Some(session) = state.sessions.get_mut(session_id) {
                             // Set active tool for status bar
@@ -341,6 +357,10 @@ impl App {
                             if let Some(last) = session.conversation.turns.last_mut()
                                 && last.role == TurnRole::Assistant
                             {
+                                let dot_style = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.subsec_nanos() as usize)
+                                    .unwrap_or(self.spinner_tick as usize);
                                 last.tool_calls
                                     .push(one_core::conversation::ToolCallRecord {
                                         id: call_id.clone(),
@@ -349,6 +369,7 @@ impl App {
                                         output: None,
                                         is_error: false,
                                         duration_ms: None,
+                                        dot_style,
                                     });
                             }
                         }
@@ -363,17 +384,34 @@ impl App {
                             self.pet.on_error();
                         }
                         // Clear active tool in status bar
+                        self.tool_exec_started = None;
                         let mut state = self.state.write().await;
                         if let Some(session) = state.sessions.get_mut(session_id) {
                             session.active_tool = None;
                         }
-                        if let Some(session) = state.sessions.get_mut(session_id)
-                            && let Some(last) = session.conversation.turns.last_mut()
-                            && let Some(tc) =
-                                last.tool_calls.iter_mut().find(|tc| tc.id == *call_id)
-                        {
-                            tc.is_error = is_error;
-                            tc.output = Some(output.clone());
+                        // Search all turns (not just the last) — the next assistant turn
+                        // may already exist by the time this event fires.
+                        if let Some(session) = state.sessions.get_mut(session_id) {
+                            'find_tc: for turn in session.conversation.turns.iter_mut().rev() {
+                                for tc in turn.tool_calls.iter_mut() {
+                                    if tc.id == *call_id {
+                                        tc.is_error = is_error;
+                                        tc.output = Some(output.clone());
+                                        break 'find_tc;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Event::DebugLog {
+                        ref session_id,
+                        ref message,
+                    } => {
+                        let mut state = self.state.write().await;
+                        if let Some(session) = state.sessions.get_mut(session_id) {
+                            session
+                                .debug_events
+                                .push((chrono::Utc::now(), message.clone()));
                         }
                     }
                     Event::Notification(notif) => {
@@ -967,19 +1005,30 @@ impl App {
                     }
                     (_, KeyCode::Enter) => {
                         if self.autocomplete.visible {
-                            if let Some(val) =
-                                self.autocomplete.accept_with_input(self.input.value())
-                            {
-                                self.input.set_value(val);
-                                self.autocomplete
-                                    .update_with_context(self.input.value(), ".", &{
-                                        let s = self.state.read().await;
-                                        s.active_session()
-                                            .map(|s| s.cwd.clone())
-                                            .unwrap_or_else(|| ".".into())
-                                    });
+                            let current = self.input.value().to_string();
+                            if let Some(val) = self.autocomplete.accept_with_input(&current) {
+                                if val == current {
+                                    // Exact match — nothing to complete, submit directly
+                                    self.autocomplete.visible = false;
+                                    self.autocomplete.suggestions.clear();
+                                } else {
+                                    self.input.set_value(val);
+                                    self.autocomplete.update_with_context(
+                                        self.input.value(),
+                                        ".",
+                                        &{
+                                            let s = self.state.read().await;
+                                            s.active_session()
+                                                .map(|s| s.cwd.clone())
+                                                .unwrap_or_else(|| ".".into())
+                                        },
+                                    );
+                                    // Accepted a completion — don't submit yet
+                                    continue;
+                                }
                             }
-                        } else if let Some(raw_msg) = self.input.submit() {
+                        }
+                        if let Some(raw_msg) = self.input.submit() {
                             // If bash mode, prefix the command back with !
                             let (msg, is_bash_cmd) = if self.bash_mode {
                                 self.bash_mode = false;
@@ -1458,11 +1507,12 @@ impl App {
                 self.draw_permission_inline(f, chunks[3], prompt);
             }
         } else {
-            // Check if conversation is empty (show banner) or has messages
+            // Show full welcome banner only if every session is still empty.
+            // Once any tab gets its first message, collapse globally — including inbox.
             let show_banner = snapshot
-                .active_session()
-                .map(|s| s.conversation.turns.is_empty())
-                .unwrap_or(true);
+                .sessions
+                .values()
+                .all(|s| s.conversation.turns.is_empty());
 
             if show_banner {
                 // Welcome layout: full banner → tabs → input (all at top)
@@ -2465,11 +2515,32 @@ impl App {
                     Style::default().fg(dot_color),
                 );
 
+                let debug_mode = snapshot.debug_mode;
+                let debug_dim = Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM);
+                let mut dbg_idx = 0usize;
+
                 for turn in &session.conversation.turns {
-                    // Skip empty assistant turns
+                    // Interleave debug events that occurred before this turn
+                    if debug_mode {
+                        while dbg_idx < session.debug_events.len()
+                            && session.debug_events[dbg_idx].0 <= turn.timestamp
+                        {
+                            result.push(Line::from(Span::styled(
+                                format!("  \u{2812} {}", session.debug_events[dbg_idx].1),
+                                debug_dim,
+                            )));
+                            dbg_idx += 1;
+                        }
+                    }
+
+                    // Skip empty assistant turns — but keep turns that have tool calls,
+                    // even when they have no prose content.
                     if turn.role == TurnRole::Assistant
                         && turn.content.trim().is_empty()
                         && !turn.is_streaming
+                        && turn.tool_calls.is_empty()
                     {
                         continue;
                     }
@@ -2502,9 +2573,6 @@ impl App {
                                         result.push(line);
                                     }
                                 }
-                            } else if turn.is_streaming {
-                                // Streaming with no content yet — just the dot
-                                result.push(Line::from(dot.clone()));
                             }
                         }
                         TurnRole::System => {
@@ -2551,9 +2619,37 @@ impl App {
                                 format!("{face_name}({})", tc.input_summary)
                             };
                             let dim = Style::default().add_modifier(Modifier::DIM);
-                            // Tool header: ⏺ ToolName(args)
+                            // Tool header: animated while running, ⏺ once complete.
+                            // Style is picked per-tool from spinner_tick at ToolRequest time.
+                            let header_dot = if tc.output.is_none() {
+                                const GROWING: &[&str] =
+                                    &["\u{00b7}", "\u{2022}", "\u{25cf}", "\u{2022}", "\u{00b7}"];
+                                const FALLING_SAND: &[&str] = &[
+                                    "⠁", "⠂", "⠄", "⡀", "⡈", "⡐", "⡠", "⣀", "⣁", "⣂", "⣄", "⣌",
+                                    "⣔", "⣤", "⣥", "⣦", "⣮", "⣶", "⣷", "⣿", "⡿", "⠿", "⢟", "⠟",
+                                    "⡛", "⠛", "⠫", "⢋", "⠋", "⠍", "⡉", "⠉", "⠑", "⠡", "⢁",
+                                ];
+                                const FOLD: &[&str] = &["-", "≻", "›", "⟩", "|", "⟨", "‹", "≺"];
+                                const BOX_BOUNCE: &[&str] = &["▖", "▘", "▝", "▗"];
+                                const BRAILLE: &[&str] =
+                                    &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                                let frames: &[&str] = match tc.dot_style % 5 {
+                                    0 => GROWING,
+                                    1 => FALLING_SAND,
+                                    2 => FOLD,
+                                    3 => BOX_BOUNCE,
+                                    _ => BRAILLE,
+                                };
+                                let d = frames[self.spinner_tick as usize % frames.len()];
+                                Span::styled(
+                                    format!("{d} "),
+                                    Style::default().fg(dot_color).add_modifier(Modifier::DIM),
+                                )
+                            } else {
+                                dot.clone()
+                            };
                             result.push(Line::from(vec![
-                                dot.clone(),
+                                header_dot,
                                 Span::styled(
                                     display,
                                     Style::default().add_modifier(Modifier::BOLD),
@@ -2568,6 +2664,14 @@ impl App {
                                         .fg(Color::Yellow)
                                         .add_modifier(Modifier::DIM),
                                 )));
+                            } else if let Some(ref output) = tc.output
+                                && output.trim().is_empty()
+                            {
+                                // Completed with no output
+                                result.push(Line::from(vec![
+                                    Span::styled("  \u{23bf}  ", dim),
+                                    Span::styled("(No output)", dim),
+                                ]));
                             } else if let Some(ref output) = tc.output
                                 && !output.is_empty()
                             {
@@ -2655,32 +2759,96 @@ impl App {
                                 }
                             }
                         }
+                        result.push(Line::from(""));
                     }
                 }
 
-                // ── Streaming status line ─────────────────────────────
-                if session.conversation.last_is_streaming() {
+                // Debug events that arrived after all turns (most recent activity)
+                if debug_mode {
+                    while dbg_idx < session.debug_events.len() {
+                        result.push(Line::from(Span::styled(
+                            format!("  \u{2812} {}", session.debug_events[dbg_idx].1),
+                            debug_dim,
+                        )));
+                        dbg_idx += 1;
+                    }
+                }
+
+                // ── Streaming / tool-execution status line ────────────
+                let is_streaming = session.conversation.last_is_streaming();
+                let tool_running = session.active_tool.is_some();
+                let is_processing = is_streaming && self.stream_started.is_none();
+
+                if is_streaming || tool_running {
                     let (verb, elapsed_str, tokens_str, tip) = self.thinking_status(session);
                     let effort_suffix = session
                         .effort
                         .as_deref()
                         .map(|e| format!(" \u{00b7} {e} effort"))
                         .unwrap_or_default();
-                    result.push(Line::from(vec![
-                        dot.clone(),
-                        Span::styled(
-                            format!("{verb}\u{2026}"),
-                            Style::default().fg(dot_color).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!(" ({elapsed_str} \u{00b7} {tokens_str}{effort_suffix})"),
-                            Style::default().fg(Color::DarkGray),
-                        ),
-                    ]));
-                    result.push(Line::from(vec![
-                        Span::styled("  \u{23bf}  ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(format!("Tip: {tip}"), Style::default().fg(Color::DarkGray)),
-                    ]));
+                    const GROWING: &[&str] =
+                        &["\u{00b7}", "\u{2022}", "\u{25cf}", "\u{2022}", "\u{00b7}"];
+                    const FALLING_SAND: &[&str] = &[
+                        "⠁", "⠂", "⠄", "⡀", "⡈", "⡐", "⡠", "⣀", "⣁", "⣂", "⣄", "⣌", "⣔", "⣤", "⣥",
+                        "⣦", "⣮", "⣶", "⣷", "⣿", "⡿", "⠿", "⢟", "⠟", "⡛", "⠛", "⠫", "⢋", "⠋", "⠍",
+                        "⡉", "⠉", "⠑", "⠡", "⢁",
+                    ];
+                    const FOLD: &[&str] = &["-", "≻", "›", "⟩", "|", "⟨", "‹", "≺"];
+                    const BOX_BOUNCE: &[&str] = &["▖", "▘", "▝", "▗"];
+                    const BRAILLE: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+                    let frames: &[&str] = match self.processing_dot_style % 5 {
+                        0 => GROWING,
+                        1 => FALLING_SAND,
+                        2 => FOLD,
+                        3 => BOX_BOUNCE,
+                        _ => BRAILLE,
+                    };
+                    let spinner = frames[self.spinner_tick as usize % frames.len()];
+                    let spinner_span = Span::styled(
+                        format!("{spinner} "),
+                        Style::default().fg(dot_color).add_modifier(Modifier::DIM),
+                    );
+                    let verb_span = Span::styled(
+                        format!("{verb}\u{2026}"),
+                        Style::default().fg(dot_color).add_modifier(Modifier::BOLD),
+                    );
+
+                    if is_processing {
+                        // Waiting for first token — model is processing the request
+                        result.push(Line::from(vec![spinner_span, verb_span]));
+                    } else {
+                        // Receiving tokens or tool running — show elapsed + token stats
+                        let elapsed_str = if tool_running && !is_streaming {
+                            // Tool execution: use per-tool timer
+                            self.tool_exec_started
+                                .map(|s| {
+                                    let secs = s.elapsed().as_secs();
+                                    if secs >= 60 {
+                                        format!("{}m {:02}s", secs / 60, secs % 60)
+                                    } else {
+                                        format!("{}s", secs)
+                                    }
+                                })
+                                .unwrap_or_else(|| "0s".to_string())
+                        } else {
+                            elapsed_str
+                        };
+                        result.push(Line::from(vec![
+                            spinner_span,
+                            verb_span,
+                            Span::styled(
+                                format!(" ({elapsed_str} \u{00b7} {tokens_str}{effort_suffix})"),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ]));
+                        result.push(Line::from(vec![
+                            Span::styled("  \u{23bf}  ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                format!("Tip: {tip}"),
+                                Style::default().fg(Color::DarkGray),
+                            ),
+                        ]));
+                    }
                     result.push(Line::from(""));
                 }
 

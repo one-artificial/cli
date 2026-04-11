@@ -75,6 +75,12 @@ pub enum Event {
         /// Number of conversation turns compressed in this pass.
         turns_compressed: usize,
     },
+    /// Diagnostic message from a background subsystem (query engine, tools, etc.).
+    /// Accumulated per-session; rendered as muted lines when debug mode is on.
+    DebugLog {
+        session_id: String,
+        message: String,
+    },
     /// Application shutdown requested
     Quit,
 }
