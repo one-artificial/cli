@@ -2751,19 +2751,42 @@ impl App {
                                             )));
                                         }
                                     }
+                                    "web_fetch" => {
+                                        let chars = output.chars().count();
+                                        result.push(out_line(&format!(
+                                            "Fetched {} chars",
+                                            fmt_count(chars)
+                                        )));
+                                    }
+                                    "web_search" => {
+                                        // Count result entries (each starts with a URL line)
+                                        let count = output
+                                            .lines()
+                                            .filter(|l| l.starts_with("URL:"))
+                                            .count();
+                                        if count > 0 {
+                                            result.push(out_line(&format!(
+                                                "Found {count} result(s)"
+                                            )));
+                                        } else {
+                                            result.push(out_line(
+                                                output.lines().next().unwrap_or("No results"),
+                                            ));
+                                        }
+                                    }
                                     _ => {
                                         if tc.is_error {
                                             let first = output.lines().next().unwrap_or("Error");
                                             result.push(Line::from(vec![
                                                 Span::styled("  \u{23bf}  ", dim),
                                                 Span::styled(
-                                                    first.to_string(),
+                                                    truncate_line(first, 120),
                                                     Style::default().fg(Color::Red),
                                                 ),
                                             ]));
                                         } else {
                                             let first = output.lines().next().unwrap_or("Done");
-                                            result.push(out_line(first));
+                                            result.push(out_line(&truncate_line(first, 120)));
                                         }
                                     }
                                 }
@@ -3417,6 +3440,17 @@ fn longest_common_prefix(strings: &[String]) -> Option<String> {
         )
     } else {
         None
+    }
+}
+
+/// Format a character/byte count as "1,234" or "12.3k".
+fn fmt_count(n: usize) -> String {
+    if n < 10_000 {
+        format!("{n}")
+    } else if n < 1_000_000 {
+        format!("{:.1}k", n as f64 / 1000.0)
+    } else {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
     }
 }
 
