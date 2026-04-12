@@ -2604,8 +2604,8 @@ impl App {
                                 ));
                             }
                         }
-                        result.push(Line::from("")); // blank line after tool block
                     }
+                    result.push(Line::from("")); // blank line after every turn
                 }
 
                 // Debug events that arrived after all turns

@@ -81,12 +81,10 @@ pub fn user_turn(content: &str) -> Vec<Line<'static>> {
     let style = Style::default()
         .fg(Color::White)
         .add_modifier(Modifier::BOLD);
-    let mut lines = vec![Line::from("")];
-    for line in content.lines() {
-        lines.push(Line::from(Span::styled(format!("> {line}"), style)));
-    }
-    lines.push(Line::from(""));
-    lines
+    content
+        .lines()
+        .map(|line| Line::from(Span::styled(format!("> {line}"), style)))
+        .collect()
 }
 
 /// `⏺ Markdown content` — dot on first line, rendered markdown below.
