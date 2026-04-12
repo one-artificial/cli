@@ -233,10 +233,10 @@ One runs several background tasks independently of the main conversation. Each c
 | Command | System | Status |
 |---|---|---|
 | `/evergreen` | Three-tier context compression | Built |
-| `/chronicle` | Cross-session synthesis into cold-tier landmarks | Coming soon |
-| `/prelude` | Speculative pre-computation of likely next response | Coming soon |
-| `/calibrate` | Skill improvement from detected preference corrections | Coming soon |
-| `/palimpsest` | Living doc maintenance for marked project files | Coming soon |
+| `/chronicle` | Cross-session synthesis into cold-tier landmark records | On by default |
+| `/prelude` | Next-prompt prediction with similarity matching | On by default |
+| `/calibrate` | Skill improvement from detected preference corrections | On by default |
+| `/palimpsest` | Living doc maintenance for `<!-- one:autodoc -->` files | On by default |
 
 All background activity appears as muted `⠒` lines in the chat when `/debug` is enabled.
 

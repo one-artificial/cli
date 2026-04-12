@@ -32,6 +32,7 @@ pub struct ToolCallRow {
     pub created_at: String,
 }
 
+#[derive(Clone)]
 pub struct EvergreenChunkRow {
     pub id: i64,
     pub span_start_id: i64,

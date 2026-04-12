@@ -1476,16 +1476,20 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "dirs-next",
  "one-ai",
  "one-core",
  "one-db",
  "one-integrations",
  "one-tools",
  "one-tui",
+ "rusqlite",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

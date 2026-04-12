@@ -934,9 +934,9 @@ async fn handle_toggle_chronicle(state: &SharedState) -> CommandResult {
     s.chronicle_enabled = !s.chronicle_enabled;
     if s.chronicle_enabled {
         CommandResult::Message(
-            "Chronicle: **ON** (not yet built)\n\
-             Cross-session synthesis — will consolidate memory across sessions \
-             into cold-tier landmark records after ≥N sessions accumulate."
+            "Chronicle: **ON** — cross-session synthesis active.\n\
+             Consolidates evergreen chunks across ≥3 sessions into cold-tier \
+             landmark records (80–120w) after 12h have elapsed."
                 .to_string(),
         )
     } else {
@@ -949,10 +949,10 @@ async fn handle_toggle_prelude(state: &SharedState) -> CommandResult {
     s.prelude_enabled = !s.prelude_enabled;
     if s.prelude_enabled {
         CommandResult::Message(
-            "Prelude: **ON** (not yet built)\n\
-             Speculative pre-computation — will predict your next prompt and \
-             start computing the response while you type, with writes isolated \
-             to a temporary overlay until you accept."
+            "Prelude: **ON** — prompt prediction active.\n\
+             Predicts your next prompt after each response. \
+             Similarity-matched predictions are noted in debug output. \
+             Full speculative execution (CoW overlay) coming in a future pass."
                 .to_string(),
         )
     } else {
@@ -965,9 +965,9 @@ async fn handle_toggle_calibrate(state: &SharedState) -> CommandResult {
     s.calibrate_enabled = !s.calibrate_enabled;
     if s.calibrate_enabled {
         CommandResult::Message(
-            "Calibrate: **ON** (not yet built)\n\
-             Skill improvement — will analyse recent turns every 5 messages \
-             to detect preference corrections and suggest updates to skill definitions."
+            "Calibrate: **ON** — skill improvement active.\n\
+             Every 5 messages, scans for preference corrections and rewrites \
+             matching project-level skill files in-place."
                 .to_string(),
         )
     } else {
@@ -980,9 +980,9 @@ async fn handle_toggle_palimpsest(state: &SharedState) -> CommandResult {
     s.palimpsest_enabled = !s.palimpsest_enabled;
     if s.palimpsest_enabled {
         CommandResult::Message(
-            "Palimpsest: **ON** (not yet built)\n\
-             Living docs — markdown files with a `<!-- one:autodoc -->` header \
-             will be kept up-to-date by a background agent as the session progresses."
+            "Palimpsest: **ON** — living docs active.\n\
+             Any markdown file containing `<!-- one:autodoc -->` will be updated \
+             by a background pass when the AI reads it."
                 .to_string(),
         )
     } else {

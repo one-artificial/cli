@@ -1284,7 +1284,11 @@ async fn main() -> Result<()> {
 
     // Clone for the Evergreen background task before the engine consumes these values.
     let evergreen_provider = ai_provider.clone();
+    let ai_provider_bg = ai_provider.clone();
     let evergreen_config = model_config.clone();
+
+    // Keep a clone of tool_executor for background tasks (Prelude needs overlay execution).
+    let tool_executor_bg = tool_executor.clone();
 
     // Spawn the query engine with tools + MCP + permissions + hooks
     let engine = QueryEngine::new(state.clone(), ai_provider, model_config, event_bus.sender())
@@ -1303,7 +1307,34 @@ async fn main() -> Result<()> {
         state.clone(),
         event_bus.sender(),
         evergreen_provider,
+        evergreen_config.clone(),
+    );
+
+    // Spawn background systems — each checks its own enabled flag before doing work.
+    let _chronicle_handle = tasks::chronicle::spawn(
+        state.clone(),
+        event_bus.sender(),
+        ai_provider_bg.clone(),
+        evergreen_config.clone(),
+    );
+    let _calibrate_handle = tasks::calibrate::spawn(
+        state.clone(),
+        event_bus.sender(),
+        ai_provider_bg.clone(),
+        evergreen_config.clone(),
+    );
+    let _palimpsest_handle = tasks::palimpsest::spawn(
+        state.clone(),
+        event_bus.sender(),
+        ai_provider_bg.clone(),
+        evergreen_config.clone(),
+    );
+    let _prelude_handle = tasks::prelude::spawn(
+        state.clone(),
+        event_bus.sender(),
+        ai_provider_bg,
         evergreen_config,
+        Some(tool_executor_bg),
     );
 
     // Launch TUI

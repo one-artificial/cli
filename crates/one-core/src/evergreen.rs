@@ -514,6 +514,29 @@ Rules:
 HOT_SUMMARY:
 ";
 
+/// Compression prompt for the **cold** tier (cross-session landmark, 80–120 words).
+/// Input is one or more warm-tier session arcs from different sessions.
+pub const COLD_COMPRESS_PROMPT: &str = "\
+Compress these warm-tier summaries into a single cold-tier landmark record. \
+A future agent will use this to orient at the start of a session where most details are lost.
+
+Output format — exactly these five fields, nothing else:
+
+PROJECT: [name / one-line description]
+FINGERPRINT: [the core technical approach in ≤2 sentences — why this approach, not what it does]
+KEY_ARTEFACTS: [3–6 most critical file/schema/endpoint names, comma-separated]
+SHARP_EDGES: [1–3 gotchas a fresh agent must know before touching anything here]
+RECALL_NOTE: [one sentence on what is known to be missing or stale]
+
+Rules:
+- 80–120 words total across all five fields. Hard limit.
+- Every word earns its place.
+- Prefer \"X was rejected because Y\" over describing X.
+- If approaches conflict across sessions, record the most recent.
+
+WARM_SUMMARIES:
+";
+
 /// Recall preamble injected at the top of the system prompt when evergreen
 /// chunks are available. `{blocks}` is replaced with the formatted tier blocks.
 pub const RECALL_PREAMBLE: &str = "\

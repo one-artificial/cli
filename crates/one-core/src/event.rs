@@ -85,6 +85,19 @@ pub enum Event {
         session_id: String,
         message: String,
     },
+    /// Prelude speculation is ready — Prelude task signals the event loop
+    /// with the predicted prompt and speculated response turns.
+    PreludeReady {
+        session_id: String,
+        prediction: String,
+        overlay_dir: String,
+        speculated_turns: Vec<(String, String)>,
+    },
+    /// Prelude speculation was accepted — inject turns into conversation.
+    PreludeAccepted {
+        session_id: String,
+        speculated_turns: Vec<(String, String)>,
+    },
     /// Application shutdown requested
     Quit,
 }
