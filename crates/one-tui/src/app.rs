@@ -1,4 +1,9 @@
 use std::io;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Global counter — incremented for every ToolRequest so consecutive tool
+/// calls on the same tick get different spinner styles.
+static STYLE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 use anyhow::Result;
 use crossterm::{
@@ -268,10 +273,8 @@ impl App {
                                 // Pick new random-ish verb, tip, and dot style for this stream
                                 self.thinking_verb_idx = self.spinner_tick as usize;
                                 self.tip_idx = (self.spinner_tick as usize).wrapping_mul(7);
-                                self.processing_dot_style = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.subsec_nanos() as usize)
-                                    .unwrap_or(self.spinner_tick as usize);
+                                self.processing_dot_style =
+                                    STYLE_COUNTER.fetch_add(1, Ordering::Relaxed);
                             }
                         }
                     }
@@ -357,10 +360,9 @@ impl App {
                             if let Some(last) = session.conversation.turns.last_mut()
                                 && last.role == TurnRole::Assistant
                             {
-                                let dot_style = std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.subsec_nanos() as usize)
-                                    .unwrap_or(self.spinner_tick as usize);
+                                // Increment a global counter so consecutive tool
+                                // calls always get distinct spinner styles.
+                                let dot_style = STYLE_COUNTER.fetch_add(1, Ordering::Relaxed);
                                 last.tool_calls
                                     .push(one_core::conversation::ToolCallRecord {
                                         id: call_id.clone(),

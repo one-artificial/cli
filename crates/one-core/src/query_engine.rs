@@ -919,6 +919,37 @@ impl QueryEngine {
                                 continue;
                             }
 
+                            // tool_search is a background process — execute it
+                            // silently without firing ToolRequest/ToolResult events.
+                            // The model discovers new schemas; we log it in debug mode.
+                            if tool_call.name == "tool_search" {
+                                let result = if let Some(ref executor) = self.tool_executor {
+                                    executor(
+                                        tool_call.name.clone(),
+                                        tool_call.input.clone(),
+                                        tool_call.id.clone(),
+                                    )
+                                    .await
+                                    .output
+                                } else {
+                                    "[]".to_string()
+                                };
+
+                                let query = tool_call.input["query"].as_str().unwrap_or("?");
+                                let _ = event_tx.send(Event::DebugLog {
+                                    session_id: session_id_owned.clone(),
+                                    message: format!("tool_search: resolved «{query}»"),
+                                });
+
+                                tool_results.push(serde_json::json!({
+                                    "type": "tool_result",
+                                    "tool_use_id": tool_call.id,
+                                    "content": result,
+                                    "is_error": false,
+                                }));
+                                continue;
+                            }
+
                             let decision = self
                                 .permission_engine
                                 .check(&tool_call.name, &tool_call.input);
