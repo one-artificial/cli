@@ -408,7 +408,15 @@ impl App {
                         ref message,
                     } => {
                         let mut state = self.state.write().await;
-                        if let Some(session) = state.sessions.get_mut(session_id) {
+                        // Empty session_id → route to whichever session is active.
+                        let target_id = if session_id.is_empty() {
+                            state.active_session_id.clone()
+                        } else {
+                            Some(session_id.clone())
+                        };
+                        if let Some(id) = target_id
+                            && let Some(session) = state.sessions.get_mut(&id)
+                        {
                             session
                                 .debug_events
                                 .push((chrono::Utc::now(), message.clone()));

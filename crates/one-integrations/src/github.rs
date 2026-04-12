@@ -60,8 +60,15 @@ impl Integration for GitHubIntegration {
                         modified,
                     }) => {
                         last_modified = modified;
+                        let count = notifications.len();
                         for notif in notifications {
                             let _ = event_tx.send(Event::Notification(notif));
+                        }
+                        if count > 0 {
+                            let _ = event_tx.send(Event::DebugLog {
+                                session_id: String::new(),
+                                message: format!("github: {count} new notification(s)"),
+                            });
                         }
                     }
                     Ok(PollResult::NotModified) => {

@@ -51,8 +51,15 @@ impl Integration for AsanaIntegration {
             while running.load(Ordering::SeqCst) {
                 match poll_tasks(&client, &token, &workspace).await {
                     Ok(notifs) => {
+                        let count = notifs.len();
                         for notif in notifs {
                             let _ = event_tx.send(Event::Notification(notif));
+                        }
+                        if count > 0 {
+                            let _ = event_tx.send(Event::DebugLog {
+                                session_id: String::new(),
+                                message: format!("asana: {count} new task update(s)"),
+                            });
                         }
                     }
                     Err(e) => {

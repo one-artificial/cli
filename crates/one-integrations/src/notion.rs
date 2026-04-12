@@ -48,8 +48,15 @@ impl Integration for NotionIntegration {
             while running.load(Ordering::SeqCst) {
                 match poll_recent_pages(&client, &token).await {
                     Ok(notifs) => {
+                        let count = notifs.len();
                         for notif in notifs {
                             let _ = event_tx.send(Event::Notification(notif));
+                        }
+                        if count > 0 {
+                            let _ = event_tx.send(Event::DebugLog {
+                                session_id: String::new(),
+                                message: format!("notion: {count} new page update(s)"),
+                            });
                         }
                     }
                     Err(e) => {

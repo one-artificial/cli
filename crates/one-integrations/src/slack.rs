@@ -49,9 +49,11 @@ impl Integration for SlackIntegration {
             let mut last_ts: Option<String> = None;
 
             while running.load(Ordering::SeqCst) {
+                let mut total_new = 0usize;
                 for channel in &channels {
                     match poll_channel(&client, &token, channel, &last_ts).await {
                         Ok(messages) => {
+                            total_new += messages.len();
                             for (notif, ts) in messages {
                                 // Track latest timestamp to avoid re-fetching
                                 if last_ts.as_ref().is_none_or(|lt| ts > *lt) {
@@ -64,6 +66,12 @@ impl Integration for SlackIntegration {
                             tracing::error!("Slack poll error for {channel}: {e}");
                         }
                     }
+                }
+                if total_new > 0 {
+                    let _ = event_tx.send(Event::DebugLog {
+                        session_id: String::new(),
+                        message: format!("slack: {total_new} new message(s)"),
+                    });
                 }
 
                 tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;

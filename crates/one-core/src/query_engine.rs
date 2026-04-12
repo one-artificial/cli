@@ -153,8 +153,16 @@ impl QueryEngine {
             let store = crate::memory::MemoryStore::for_project(&project_dir);
             if let Err(e) = store.save(&memory) {
                 tracing::warn!("Failed to auto-save memory: {e}");
+                self.debug(session_id, format!("memory: auto-save failed — {e}"));
             } else {
                 tracing::info!("Auto-saved {} memory: {}", memory.memory_type, memory.name);
+                self.debug(
+                    session_id,
+                    format!(
+                        "memory: auto-saved {} «{}»",
+                        memory.memory_type, memory.name
+                    ),
+                );
             }
         }
 
@@ -583,6 +591,13 @@ impl QueryEngine {
                                     let _bg_sid = session_id_owned.clone();
                                     let bg_agent_id = agent_id.clone();
 
+                                    let _ = event_tx.send(Event::DebugLog {
+                                        session_id: session_id_owned.clone(),
+                                        message: format!(
+                                            "agent: spawned background agent {agent_id} — {description}"
+                                        ),
+                                    });
+
                                     tokio::spawn(async move {
                                         // Create a mini query engine for the background agent
                                         let mut bg_engine = QueryEngine::new(
@@ -624,6 +639,12 @@ impl QueryEngine {
                                         ));
 
                                         tracing::info!("Background agent {bg_agent_id} completed");
+                                        let _ = bg_event_tx.send(Event::DebugLog {
+                                            session_id: String::new(), // route to active session
+                                            message: format!(
+                                                "agent: background agent {bg_agent_id} completed"
+                                            ),
+                                        });
                                     });
 
                                     let msg = format!(
@@ -872,6 +893,10 @@ impl QueryEngine {
 
                                 let skills = crate::skills::load_skills(&project_dir);
                                 if let Some(skill) = skills.iter().find(|s| s.name == skill_name) {
+                                    let _ = event_tx.send(Event::DebugLog {
+                                        session_id: session_id_owned.clone(),
+                                        message: format!("skill: loading /{skill_name}"),
+                                    });
                                     let prompt = crate::skills::prepare_skill_prompt(
                                         skill,
                                         args,
