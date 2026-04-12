@@ -61,7 +61,7 @@ async fn run(
         };
 
         match evt {
-            // A full AI response turn has just completed — this is our trigger point.
+            // Auto-trigger: a full AI response turn just completed.
             // The persistence task is also subscribed and will have written the turn
             // to SessionDb; the 100 ms sleep gives it a head start.
             Event::AiResponseChunk {
@@ -69,6 +69,10 @@ async fn run(
                 done: true,
                 ..
             } => {
+                let enabled = state.read().await.evergreen_enabled;
+                if !enabled {
+                    continue;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
                 if let Err(e) = maybe_compress(
@@ -82,6 +86,22 @@ async fn run(
                 .await
                 {
                     tracing::warn!("evergreen: compression attempt failed for {session_id}: {e}");
+                }
+            }
+            // Manual trigger from /evergreen command — runs regardless of toggle state
+            // so the user can force a pass even after re-enabling.
+            Event::TriggerEvergreen { session_id } => {
+                if let Err(e) = maybe_compress(
+                    &session_id,
+                    &state,
+                    &event_tx,
+                    &provider,
+                    &compress_config,
+                    &cfg,
+                )
+                .await
+                {
+                    tracing::warn!("evergreen: manual compression failed for {session_id}: {e}");
                 }
             }
             Event::Quit => break,

@@ -1316,6 +1316,9 @@ impl App {
                                             });
                                         }
                                     }
+                                    crate::commands::CommandResult::EmitEvent(evt) => {
+                                        let _ = self.event_tx.send(evt);
+                                    }
                                     crate::commands::CommandResult::Silent => {}
                                     crate::commands::CommandResult::Quit => {
                                         let _ = self.event_tx.send(Event::Quit);

@@ -69,6 +69,10 @@ pub enum Event {
         question: String,
         options: Vec<String>,
     },
+    /// Manually trigger an Evergreen compression pass for a session.
+    TriggerEvergreen {
+        session_id: String,
+    },
     /// Evergreen background compressor completed a compression pass.
     EvergreenCompressed {
         session_id: String,

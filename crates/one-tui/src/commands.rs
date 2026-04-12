@@ -24,6 +24,8 @@ pub enum CommandResult {
     Quit,
     /// Open the interactive session import picker
     OpenImportPicker,
+    /// Emit an event on the bus — used by commands that trigger background tasks
+    EmitEvent(one_core::event::Event),
 }
 
 /// Process a slash command. Returns how to handle it.
@@ -81,6 +83,12 @@ pub async fn handle_command(
         ),
         "/debug" => handle_debug(state).await,
         "/plan" => handle_plan(state).await,
+        // Background system toggles
+        "/evergreen" => handle_toggle_evergreen(state).await,
+        "/chronicle" => handle_toggle_chronicle(state).await,
+        "/prelude" => handle_toggle_prelude(state).await,
+        "/calibrate" => handle_toggle_calibrate(state).await,
+        "/palimpsest" => handle_toggle_palimpsest(state).await,
         "/permissions" | "/perms" => handle_permissions(),
         "/mcp" => handle_mcp(),
         "/memory" | "/memories" => handle_memory(args, state).await,
@@ -150,6 +158,11 @@ fn help_text() -> String {
 /bug               Report an issue
 /plan              Toggle plan mode (describe actions without executing)
 /debug             Toggle debug mode (show background activity as muted lines)
+/evergreen         Toggle background context compression (hot/warm passes)
+/chronicle         Toggle cross-session synthesis (coming soon)
+/prelude           Toggle speculative pre-computation (coming soon)
+/calibrate         Toggle skill improvement analysis (coming soon)
+/palimpsest        Toggle living doc maintenance (coming soon)
 /permissions       Show permission settings and rules
 /mcp               Show MCP server connections and tools
 /memory            List saved memories (or /memory search <query>)
@@ -895,6 +908,85 @@ async fn handle_debug(state: &SharedState) -> CommandResult {
         )
     } else {
         CommandResult::Message("Debug mode: **OFF**".to_string())
+    }
+}
+
+async fn handle_toggle_evergreen(state: &SharedState) -> CommandResult {
+    let mut s = state.write().await;
+    s.evergreen_enabled = !s.evergreen_enabled;
+    if s.evergreen_enabled {
+        CommandResult::Message(
+            "Evergreen: **ON** — background compression will run after each response turn.\n\
+             Compresses old context into hot/warm summaries to keep the context window lean."
+                .to_string(),
+        )
+    } else {
+        CommandResult::Message(
+            "Evergreen: **OFF** — background compression suspended.\n\
+             Conversation history will grow unbounded until manual /compact."
+                .to_string(),
+        )
+    }
+}
+
+async fn handle_toggle_chronicle(state: &SharedState) -> CommandResult {
+    let mut s = state.write().await;
+    s.chronicle_enabled = !s.chronicle_enabled;
+    if s.chronicle_enabled {
+        CommandResult::Message(
+            "Chronicle: **ON** (not yet built)\n\
+             Cross-session synthesis — will consolidate memory across sessions \
+             into cold-tier landmark records after ≥N sessions accumulate."
+                .to_string(),
+        )
+    } else {
+        CommandResult::Message("Chronicle: **OFF**".to_string())
+    }
+}
+
+async fn handle_toggle_prelude(state: &SharedState) -> CommandResult {
+    let mut s = state.write().await;
+    s.prelude_enabled = !s.prelude_enabled;
+    if s.prelude_enabled {
+        CommandResult::Message(
+            "Prelude: **ON** (not yet built)\n\
+             Speculative pre-computation — will predict your next prompt and \
+             start computing the response while you type, with writes isolated \
+             to a temporary overlay until you accept."
+                .to_string(),
+        )
+    } else {
+        CommandResult::Message("Prelude: **OFF**".to_string())
+    }
+}
+
+async fn handle_toggle_calibrate(state: &SharedState) -> CommandResult {
+    let mut s = state.write().await;
+    s.calibrate_enabled = !s.calibrate_enabled;
+    if s.calibrate_enabled {
+        CommandResult::Message(
+            "Calibrate: **ON** (not yet built)\n\
+             Skill improvement — will analyse recent turns every 5 messages \
+             to detect preference corrections and suggest updates to skill definitions."
+                .to_string(),
+        )
+    } else {
+        CommandResult::Message("Calibrate: **OFF**".to_string())
+    }
+}
+
+async fn handle_toggle_palimpsest(state: &SharedState) -> CommandResult {
+    let mut s = state.write().await;
+    s.palimpsest_enabled = !s.palimpsest_enabled;
+    if s.palimpsest_enabled {
+        CommandResult::Message(
+            "Palimpsest: **ON** (not yet built)\n\
+             Living docs — markdown files with a `<!-- one:autodoc -->` header \
+             will be kept up-to-date by a background agent as the session progresses."
+                .to_string(),
+        )
+    } else {
+        CommandResult::Message("Palimpsest: **OFF**".to_string())
     }
 }
 
