@@ -1477,6 +1477,17 @@ impl QueryEngine {
         // Inject evergreen recall context if available
         if let Some(ref recall) = session.evergreen_context {
             prompt.push_str(&format!("\n\n{recall}"));
+            // Count tiers present in the recall block for debug visibility.
+            let hot = recall.matches("--- HOT").count();
+            let warm = recall.matches("--- WARM").count();
+            let cold = recall.matches("--- COLD").count();
+            let _ = self.event_tx.send(Event::DebugLog {
+                session_id: session.id.clone(),
+                message: format!(
+                    "recall: injecting {} hot · {} warm · {} cold chunks into system prompt",
+                    hot, warm, cold,
+                ),
+            });
         }
 
         // Add agent-specific role instructions if routed

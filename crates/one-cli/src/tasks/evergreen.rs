@@ -263,6 +263,24 @@ async fn maybe_compress(
     // ── Phase 3: parse structured fields, write to DB, refresh recall ────────
 
     let parsed = one_core::evergreen::parse_sections(&summary);
+
+    // Emit parse results as a debug line so the user can verify extraction.
+    let _ = event_tx.send(Event::DebugLog {
+        session_id: session_id.to_string(),
+        message: format!(
+            "evergreen: parsed — {} artefacts · {} open · {} errors · {} decided{}",
+            parsed.artefacts.len(),
+            parsed.open_items.len(),
+            parsed.errors.len(),
+            parsed.decided.len(),
+            parsed
+                .goal
+                .as_deref()
+                .map(|g| format!(" · goal: {}", g.chars().take(60).collect::<String>()))
+                .unwrap_or_default(),
+        ),
+    });
+
     let artefacts_json = serde_json::to_string(&parsed.artefacts).unwrap_or_default();
     let errors_json = serde_json::to_string(&parsed.errors).unwrap_or_default();
     let open_json = serde_json::to_string(&parsed.open_items).unwrap_or_default();
@@ -313,6 +331,19 @@ async fn maybe_compress(
             .collect();
         one_core::evergreen::build_recall_context(&chunks, None)
     };
+
+    // Log recall store state so users can see the full picture in debug mode.
+    let hot_n = all_chunks.iter().filter(|c| c.tier == "hot").count();
+    let warm_n = all_chunks.iter().filter(|c| c.tier == "warm").count();
+    let cold_n = all_chunks.iter().filter(|c| c.tier == "cold").count();
+    let total_artefacts: usize = all_chunks.iter().map(|c| c.artefacts.len()).sum();
+    let _ = event_tx.send(Event::DebugLog {
+        session_id: session_id.to_string(),
+        message: format!(
+            "evergreen: recall store — {} hot · {} warm · {} cold · {} total artefacts",
+            hot_n, warm_n, cold_n, total_artefacts,
+        ),
+    });
     {
         let mut s = state.write().await;
         if let Some(session) = s.sessions.get_mut(session_id) {
