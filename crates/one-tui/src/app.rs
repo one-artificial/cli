@@ -96,6 +96,9 @@ pub struct App {
     tip_idx: usize,
     /// When the current tool execution started (for elapsed time display)
     tool_exec_started: Option<std::time::Instant>,
+    /// True from ToolResult until the next AiResponseChunk — keeps the status
+    /// line visible during the gap where the engine is preparing the next API call.
+    is_between_tools: bool,
     /// Which processing-dot animation style is active for the current tool (0–3).
     /// Picked from spinner_tick when ToolRequest fires so it varies between calls.
     processing_dot_style: usize,
@@ -137,6 +140,7 @@ impl App {
             close_confirm: false,
             stream_started: None,
             tool_exec_started: None,
+            is_between_tools: false,
             processing_dot_style: 0,
             thinking_verb_idx: 0,
             tip_idx: 0,
@@ -230,6 +234,7 @@ impl App {
                             self.pet.on_response_complete();
                             self.messages_scroll = 0;
                             self.stream_started = None;
+                            self.is_between_tools = false;
                             // Derive tab title from first AI response
                             let sid = session_id.clone();
                             if !self.named_sessions.contains(&sid) {
@@ -268,6 +273,7 @@ impl App {
                             }
                         } else {
                             self.pet.on_response_start();
+                            self.is_between_tools = false;
                             if self.stream_started.is_none() {
                                 self.stream_started = Some(std::time::Instant::now());
                                 // Pick new random-ish verb, tip, and dot style for this stream
@@ -385,8 +391,10 @@ impl App {
                         if is_error {
                             self.pet.on_error();
                         }
-                        // Clear active tool in status bar
+                        // Clear active tool in status bar; mark the gap between
+                        // tool completion and the next response starting.
                         self.tool_exec_started = None;
+                        self.is_between_tools = true;
                         let mut state = self.state.write().await;
                         if let Some(session) = state.sessions.get_mut(session_id) {
                             session.active_tool = None;
@@ -2812,9 +2820,12 @@ impl App {
                 // ── Streaming / tool-execution status line ────────────
                 let is_streaming = session.conversation.last_is_streaming();
                 let tool_running = session.active_tool.is_some();
-                let is_processing = is_streaming && self.stream_started.is_none();
+                // is_between_tools: ToolResult landed but next AiResponseChunk hasn't
+                // fired yet — the engine is preparing the next API call.
+                let is_processing =
+                    (is_streaming && self.stream_started.is_none()) || self.is_between_tools;
 
-                if is_streaming || tool_running {
+                if is_streaming || tool_running || self.is_between_tools {
                     let (verb, elapsed_str, tokens_str, tip) = self.thinking_status(session);
                     let effort_suffix = session
                         .effort
