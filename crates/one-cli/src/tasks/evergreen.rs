@@ -98,6 +98,10 @@ struct SpanData {
     span_end_id: i64,
     /// Chronological (role, content) pairs for the span to summarize.
     turns: Vec<(String, String)>,
+    /// Estimated token count of the raw span (for before/after logging).
+    span_tokens: u64,
+    /// Whether this is an archive (2nd-pass) or compress (1st-pass) batch.
+    is_archive: bool,
 }
 
 async fn maybe_compress(
@@ -134,6 +138,7 @@ async fn maybe_compress(
         };
 
         // Prefer archive (2nd-pass) over compress (1st-pass) — higher ROI per call.
+        let is_archive = plan.archive_batch.is_some();
         let batch = if let Some(b) = plan.archive_batch {
             b
         } else {
@@ -171,6 +176,8 @@ async fn maybe_compress(
                 .iter()
                 .map(|m| (m.role.clone(), m.content.clone()))
                 .collect(),
+            span_tokens,
+            is_archive,
         }))
     })
     .await??;
@@ -180,6 +187,23 @@ async fn maybe_compress(
     };
 
     // ── Phase 2: AI summarization (async) ─────────────────────────────────────
+
+    let tier_label = if span.is_archive {
+        "archive"
+    } else {
+        "compress"
+    };
+    let _ = event_tx.send(Event::DebugLog {
+        session_id: session_id.to_string(),
+        message: format!(
+            "evergreen → {} pass: {} turns ≈{} tokens [ids {}..{}]",
+            tier_label,
+            span.turns.len(),
+            span.span_tokens,
+            span.span_start_id,
+            span.span_end_id,
+        ),
+    });
 
     let conversation_text = span
         .turns
@@ -222,6 +246,21 @@ async fn maybe_compress(
     .await??;
 
     // ── Phase 4: notify the event bus ────────────────────────────────────────
+
+    let summary_tokens = one_core::evergreen::estimate_tokens(&summary);
+    let saved = span.span_tokens.saturating_sub(summary_tokens);
+    let pct = if span.span_tokens > 0 {
+        (saved * 100) / span.span_tokens
+    } else {
+        0
+    };
+    let _ = event_tx.send(Event::DebugLog {
+        session_id: session_id.to_string(),
+        message: format!(
+            "evergreen ← {} turns → ≈{} tokens ({}% reduction, saved ≈{})",
+            turns_compressed, summary_tokens, pct, saved,
+        ),
+    });
 
     let _ = event_tx.send(Event::EvergreenCompressed {
         session_id: session_id.to_string(),
