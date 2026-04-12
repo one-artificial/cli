@@ -1537,12 +1537,13 @@ impl App {
 
             if show_banner {
                 // Welcome layout: full banner → tabs → input (all at top)
+                let ih = input_box_height(self.input.value(), f.area().width);
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(12), // Welcome banner
                         Constraint::Length(3),  // Tab bar
-                        Constraint::Length(3),  // Input (right under tabs)
+                        Constraint::Length(ih), // Input (right under tabs)
                         Constraint::Min(0),     // Empty space below
                     ])
                     .split(f.area());
@@ -1574,13 +1575,14 @@ impl App {
                 self.draw_help_overlay(f, chunks[3]);
             } else {
                 // Conversation layout: compact banner → tabs → messages → input
+                let ih = input_box_height(self.input.value(), f.area().width);
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Length(1), // Compact banner
-                        Constraint::Length(3), // Tab bar
-                        Constraint::Min(1),    // Messages
-                        Constraint::Length(3), // Input
+                        Constraint::Length(1),  // Compact banner
+                        Constraint::Length(3),  // Tab bar
+                        Constraint::Min(1),     // Messages
+                        Constraint::Length(ih), // Input
                     ])
                     .split(f.area());
 
@@ -2893,10 +2895,32 @@ impl App {
                     .title(title)
                     .border_style(Style::default().fg(border_color)),
             )
-            .style(text_style);
+            .style(text_style)
+            .wrap(Wrap { trim: false });
 
         f.render_widget(input, area);
-        f.set_cursor_position((area.x + self.input.cursor_position() as u16 + 1, area.y + 1));
+
+        // Compute cursor (row, col) accounting for newlines and line-wrapping.
+        let inner_width = area.width.saturating_sub(2) as usize;
+        let cursor_byte = self.input.cursor_position();
+        let text_before = &display_text[..cursor_byte.min(display_text.len())];
+        let mut crow = 0u16;
+        let mut ccol = 0u16;
+        if inner_width > 0 {
+            for ch in text_before.chars() {
+                if ch == '\n' {
+                    crow += 1;
+                    ccol = 0;
+                } else {
+                    ccol += 1;
+                    if ccol >= inner_width as u16 {
+                        crow += 1;
+                        ccol = 0;
+                    }
+                }
+            }
+        }
+        f.set_cursor_position((area.x + ccol + 1, area.y + crow + 1));
     }
 
     /// Render inline help overlay (triggered by typing '?').
@@ -3221,6 +3245,32 @@ fn longest_common_prefix(strings: &[String]) -> Option<String> {
     } else {
         None
     }
+}
+
+/// Count the visual lines a string occupies when rendered at `inner_width` chars.
+fn input_content_lines(value: &str, inner_width: u16) -> u16 {
+    if inner_width == 0 {
+        return 1;
+    }
+    let w = inner_width as usize;
+    value
+        .lines()
+        .map(|line| {
+            let chars = line.chars().count();
+            if chars == 0 {
+                1
+            } else {
+                chars.div_ceil(w) as u16
+            }
+        })
+        .sum::<u16>()
+        .max(1)
+}
+
+/// Height of the input box (content lines + 2 border rows), clamped to 1–10.
+fn input_box_height(value: &str, terminal_width: u16) -> u16 {
+    let inner = terminal_width.saturating_sub(2);
+    (input_content_lines(value, inner) + 2).clamp(3, 10)
 }
 
 fn format_token_count(tokens: u64) -> String {
