@@ -205,22 +205,33 @@ async fn maybe_compress(
         ),
     });
 
-    let conversation_text = span
-        .turns
-        .iter()
-        .map(|(role, content)| format!("{role}: {content}"))
-        .collect::<Vec<_>>()
-        .join("\n\n---\n\n");
+    // Build the prompt and tier label based on whether this is a first or second pass.
+    // Hot (first-pass): raw conversation turns → structured 300–500 word record.
+    // Warm (second-pass): previous hot summary → 150–250 word session arc.
+    let tier = if span.is_archive { "warm" } else { "hot" };
+    let (prompt_prefix, input_text) = if span.is_archive {
+        // Archive pass: input is previous hot summaries, joined together.
+        let combined = span
+            .turns
+            .iter()
+            .map(|(_role, content)| content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n");
+        (one_core::evergreen::WARM_COMPRESS_PROMPT, combined)
+    } else {
+        // Compress pass: input is raw conversation turns.
+        let conversation_text = span
+            .turns
+            .iter()
+            .map(|(role, content)| format!("{role}: {content}"))
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n");
+        (one_core::evergreen::HOT_COMPRESS_PROMPT, conversation_text)
+    };
 
     let messages = vec![Message {
         role: Role::User,
-        content: format!(
-            "Summarize this conversation excerpt for long-term context compression. \
-             Be dense and factual. Preserve: key decisions, file paths, function names, \
-             specific values, errors and how they were resolved. \
-             Omit pleasantries and repetition. 200-400 words.\n\n\
-             CONVERSATION:\n{conversation_text}"
-        ),
+        content: format!("{prompt_prefix}{input_text}"),
     }];
 
     let response = provider.send_message(&messages, compress_config).await?;
@@ -229,21 +240,38 @@ async fn maybe_compress(
         return Ok(());
     }
 
-    // ── Phase 3: write results back to the DB (blocking) ─────────────────────
+    // ── Phase 3: write results back to the DB and refresh recall context ──────
 
     let turns_compressed = span.turns.len();
     let span_start_id = span.span_start_id;
     let span_end_id = span.span_end_id;
     let db_path3 = db_path.clone();
     let summary3 = summary.clone();
+    let tier3 = tier.to_string();
 
-    tokio::task::spawn_blocking(move || {
+    let all_chunks = tokio::task::spawn_blocking(move || {
         let db = SessionDb::open(&db_path3)?;
-        db.save_evergreen_chunk(span_start_id, span_end_id, &summary3, None)?;
+        db.save_evergreen_chunk(span_start_id, span_end_id, &summary3, &tier3, None)?;
         db.mark_messages_compressed(span_start_id, span_end_id)?;
-        anyhow::Ok(())
+        // Return all chunks so we can rebuild the recall context in-memory.
+        db.load_evergreen_chunks()
     })
     .await??;
+
+    // Update the session's in-memory recall context so the next API call picks it up.
+    let recall = {
+        let pairs: Vec<(&str, &str)> = all_chunks
+            .iter()
+            .map(|c| (c.tier.as_str(), c.summary.as_str()))
+            .collect();
+        one_core::evergreen::build_recall_context(&pairs)
+    };
+    {
+        let mut s = state.write().await;
+        if let Some(session) = s.sessions.get_mut(session_id) {
+            session.evergreen_context = recall;
+        }
+    }
 
     // ── Phase 4: notify the event bus ────────────────────────────────────────
 

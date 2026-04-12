@@ -206,6 +206,128 @@ pub fn estimate_tokens(content: &str) -> u64 {
     (content.len() as u64).div_ceil(4)
 }
 
+// ── Prompts ───────────────────────────────────────────────────────────────────
+
+/// Compression prompt for the **hot** tier (first-pass, recent turns).
+/// Produces a 300–500 word structured machine-readable record.
+pub const HOT_COMPRESS_PROMPT: &str = "\
+You are a lossless context compressor for an engineering session. Your output will be \
+the sole source of truth for a future agent that has no memory of this conversation.
+
+Produce a structured summary using EXACTLY these labelled sections. Be maximally \
+dense — this is not a narrative, it is a machine-readable record.
+
+GOAL: [one sentence: what we are trying to build, fix, or decide]
+
+STATE: [current working state — what is building/passing/broken right now]
+
+DECIDED:
+- [decision made] — instead of [rejected alternative] — because [reason]
+(repeat for each decision; always include the tradeoff)
+
+ARTEFACTS:
+- [exact file paths, function/method names, env var names, table/schema names, \
+API endpoints, port numbers, package names and versions]
+(if none: ARTEFACTS: none yet)
+
+ERRORS:
+- [exact error message or type] → [how resolved] | OPEN if unresolved
+(include the stack frame or line if mentioned)
+
+OPEN:
+- [unresolved questions, known unknowns, next intended actions]
+
+RECALL_GAPS:
+- [anything you suspect was discussed but is not captured in the excerpt — \
+e.g. \"earlier auth flow details not in this excerpt\"]
+
+Rules:
+- No prose paragraphs. Dense labelled bullets only.
+- Preserve exact strings: file paths, error messages, function names. Do not paraphrase these.
+- If something was decided and then reversed, record the reversal with reason.
+- Omit: greetings, affirmations, explanations of what Claude is doing, filler.
+- 300–500 words total. If you are under 300, you have lost signal. \
+If you are over 500, you have added noise.
+
+CONVERSATION:
+";
+
+/// Compression prompt for the **warm** tier (second-pass, compressing hot summaries).
+/// Produces a 150–250 word session arc.
+pub const WARM_COMPRESS_PROMPT: &str = "\
+You are compressing a hot-tier context summary into a warm-tier session arc. \
+The input is a previous hot-tier summary, not raw conversation.
+
+Preserve only what a future agent needs to understand the shape of this session \
+without re-reading it. Collapse what is resolved. Keep what constrains future decisions.
+
+Output format:
+
+SESSION_GOAL: [one sentence]
+
+APPROACH: [chosen approach + why alternatives were rejected — \
+this is the most important field]
+
+STABLE_ARTEFACTS:
+- [file paths, schema names, contracts that are now settled and unlikely to change]
+
+CONSTRAINTS:
+- [discovered constraints: API limits, env requirements, platform quirks, team \
+decisions, anything that will bite a future agent if forgotten]
+
+RESOLVED: [brief list of threads that are fully closed — one line each]
+
+SHARP_EDGES:
+- [known gotchas, partial implementations, things that look done but aren't]
+
+Rules:
+- 150–250 words. Hard limits.
+- Do not re-expand resolved errors unless the resolution itself is a constraint.
+- If the hot summary contained RECALL_GAPS, propagate them here.
+
+HOT_SUMMARY:
+";
+
+/// Recall preamble injected at the top of the system prompt when evergreen
+/// chunks are available. `{blocks}` is replaced with the formatted tier blocks.
+pub const RECALL_PREAMBLE: &str = "\
+# Evergreen Context
+
+You have access to compressed context from previous work in this session via an \
+evergreen memory store. This context was produced by a tiered summarisation pipeline \
+and may be incomplete.
+
+Before acting on recalled context:
+- Treat ARTEFACTS as reliable (exact names/paths were preserved)
+- Treat DECIDED as reliable but verify reversals with the user if stakes are high
+- Treat OPEN as stale — these may have been resolved since compression
+- If RECALL_GAPS are listed, acknowledge them if relevant rather than guessing
+- Warm-tier records are orientation only — do not over-index on them
+
+If asked about something not in the compressed record, say so explicitly rather \
+than inferring.
+
+[CONTEXT FOLLOWS]
+";
+
+/// Build the recall context string from a list of `(tier, summary)` pairs
+/// (ordered oldest-first). Returns `None` if `chunks` is empty.
+pub fn build_recall_context(chunks: &[(&str, &str)]) -> Option<String> {
+    if chunks.is_empty() {
+        return None;
+    }
+    let mut out = RECALL_PREAMBLE.to_string();
+    for (tier, summary) in chunks {
+        let label = match *tier {
+            "warm" => "WARM — session arc",
+            "cold" => "COLD — landmark",
+            _ => "HOT — recent context",
+        };
+        out.push_str(&format!("\n--- {label} ---\n{summary}\n"));
+    }
+    Some(out)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

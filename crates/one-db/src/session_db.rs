@@ -39,6 +39,8 @@ pub struct EvergreenChunkRow {
     pub summary: String,
     /// JSON array of message IDs that must always be retrieved verbatim.
     pub vital_refs: Option<String>,
+    /// Compression tier: "hot" (first-pass), "warm" (second-pass), "cold" (landmark).
+    pub tier: String,
     pub created_at: String,
 }
 
@@ -129,6 +131,7 @@ impl SessionDb {
                 span_end_id   INTEGER NOT NULL,
                 summary       TEXT    NOT NULL,
                 vital_refs    TEXT,       -- JSON array of message IDs to always fetch verbatim
+                tier          TEXT    NOT NULL DEFAULT 'hot', -- hot | warm | cold
                 created_at    TEXT    NOT NULL
             );
 
@@ -141,6 +144,12 @@ impl SessionDb {
             );
             ",
         )?;
+        // Add tier column to existing DBs that pre-date this field.
+        // SQLite has no ADD COLUMN IF NOT EXISTS; ignore duplicate-column errors.
+        let _ = self.conn.execute(
+            "ALTER TABLE evergreen_chunks ADD COLUMN tier TEXT NOT NULL DEFAULT 'hot'",
+            [],
+        );
         Ok(())
     }
 }
@@ -406,21 +415,22 @@ impl SessionDb {
         span_start_id: i64,
         span_end_id: i64,
         summary: &str,
+        tier: &str,
         vital_refs: Option<&str>,
     ) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT INTO evergreen_chunks
-             (span_start_id, span_end_id, summary, vital_refs, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![span_start_id, span_end_id, summary, vital_refs, now],
+             (span_start_id, span_end_id, summary, tier, vital_refs, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![span_start_id, span_end_id, summary, tier, vital_refs, now],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
     pub fn load_evergreen_chunks(&self) -> Result<Vec<EvergreenChunkRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, span_start_id, span_end_id, summary, vital_refs, created_at
+            "SELECT id, span_start_id, span_end_id, summary, vital_refs, tier, created_at
              FROM evergreen_chunks ORDER BY span_start_id ASC",
         )?;
         let rows = stmt
@@ -431,7 +441,10 @@ impl SessionDb {
                     span_end_id: row.get(2)?,
                     summary: row.get(3)?,
                     vital_refs: row.get(4)?,
-                    created_at: row.get(5)?,
+                    tier: row
+                        .get::<_, Option<String>>(5)?
+                        .unwrap_or_else(|| "hot".to_string()),
+                    created_at: row.get(6)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -518,7 +531,7 @@ mod tests {
             .save_message("assistant", "msg2", "2026-04-11T10:00:01Z", Some(100))
             .unwrap();
         db.mark_messages_compressed(id1, id2).unwrap();
-        db.save_evergreen_chunk(id1, id2, "Summary of msgs 1-2", None)
+        db.save_evergreen_chunk(id1, id2, "Summary of msgs 1-2", "hot", None)
             .unwrap();
 
         let chunks = db.load_evergreen_chunks().unwrap();

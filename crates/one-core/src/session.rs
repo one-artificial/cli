@@ -36,6 +36,10 @@ pub struct Session {
     /// Debug event log — timestamped messages from background subsystems.
     /// Not persisted; interleaved with turns in the TUI when debug mode is on.
     pub debug_events: Vec<(chrono::DateTime<chrono::Utc>, String)>,
+    /// Formatted recall preamble built from evergreen chunks — injected into
+    /// the system prompt. Populated at session load and updated after each
+    /// evergreen pass. Not persisted (rebuilt from the DB on load).
+    pub evergreen_context: Option<String>,
 }
 
 impl Session {
@@ -64,6 +68,7 @@ impl Session {
             session_hash: String::new(),
             branch: String::new(),
             debug_events: Vec::new(),
+            evergreen_context: None,
         }
     }
 

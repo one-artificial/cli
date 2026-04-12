@@ -1474,6 +1474,11 @@ impl QueryEngine {
             model_name,
         );
 
+        // Inject evergreen recall context if available
+        if let Some(ref recall) = session.evergreen_context {
+            prompt.push_str(&format!("\n\n{recall}"));
+        }
+
         // Add agent-specific role instructions if routed
         if let Some(role) = agent_role {
             prompt.push_str(&format!("\n\n# Agent Role\n\n{}", role.system_prompt()));
