@@ -36,11 +36,13 @@ pub struct EvergreenChunkRow {
     pub id: i64,
     pub span_start_id: i64,
     pub span_end_id: i64,
-    pub summary: String,
-    /// JSON array of message IDs that must always be retrieved verbatim.
-    pub vital_refs: Option<String>,
-    /// Compression tier: "hot" (first-pass), "warm" (second-pass), "cold" (landmark).
     pub tier: String,
+    pub summary: String,
+    // Parsed structured fields
+    pub goal: Option<String>,
+    pub artefacts: Vec<String>,  // deserialised from artefacts_json
+    pub open_items: Vec<String>, // deserialised from open_json
+    pub sharp_edges: Vec<String>,
     pub created_at: String,
 }
 
@@ -93,6 +95,19 @@ impl SessionDb {
     }
 
     fn migrate(&self) -> Result<()> {
+        // Schema version gate — nuke evergreen_chunks when schema is outdated.
+        // No backwards compatibility: old chunk records are dropped and rebuilt
+        // by the next Evergreen pass.
+        const SCHEMA_VERSION: i64 = 2;
+        let version: i64 = self
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap_or(0);
+        if version < SCHEMA_VERSION {
+            self.conn
+                .execute_batch("DROP TABLE IF EXISTS evergreen_chunks;")?;
+        }
+
         self.conn.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS messages (
@@ -124,15 +139,29 @@ impl SessionDb {
                 value TEXT NOT NULL
             );
 
-            -- Compressed context spans produced by the Evergreen background task
+            -- Compressed context spans (schema v2 — structured fields for symbolic retrieval)
             CREATE TABLE IF NOT EXISTS evergreen_chunks (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                span_start_id INTEGER NOT NULL,
-                span_end_id   INTEGER NOT NULL,
-                summary       TEXT    NOT NULL,
-                vital_refs    TEXT,       -- JSON array of message IDs to always fetch verbatim
-                tier          TEXT    NOT NULL DEFAULT 'hot', -- hot | warm | cold
-                created_at    TEXT    NOT NULL
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                span_start_id   INTEGER NOT NULL,
+                span_end_id     INTEGER NOT NULL,
+                tier            TEXT    NOT NULL DEFAULT 'hot',
+                -- Full summary text (for display and BM25 indexing)
+                summary         TEXT    NOT NULL,
+                -- Parsed structured fields
+                goal            TEXT,
+                state_text      TEXT,
+                approach        TEXT,
+                fingerprint     TEXT,
+                artefacts_json  TEXT    NOT NULL DEFAULT '[]',
+                errors_json     TEXT    NOT NULL DEFAULT '[]',
+                open_json       TEXT    NOT NULL DEFAULT '[]',
+                decided_json    TEXT    NOT NULL DEFAULT '[]',
+                constraints_json TEXT   NOT NULL DEFAULT '[]',
+                sharp_edges_json TEXT   NOT NULL DEFAULT '[]',
+                recall_note     TEXT,
+                resolved        TEXT,
+                vital_refs      TEXT,
+                created_at      TEXT    NOT NULL
             );
 
             -- Raw JSONL lines preserved for lossless import/export round-trips
@@ -144,12 +173,9 @@ impl SessionDb {
             );
             ",
         )?;
-        // Add tier column to existing DBs that pre-date this field.
-        // SQLite has no ADD COLUMN IF NOT EXISTS; ignore duplicate-column errors.
-        let _ = self.conn.execute(
-            "ALTER TABLE evergreen_chunks ADD COLUMN tier TEXT NOT NULL DEFAULT 'hot'",
-            [],
-        );
+        // Stamp the schema version so future opens skip the drop-and-recreate.
+        self.conn
+            .execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))?;
         Ok(())
     }
 }
@@ -410,41 +436,75 @@ impl SessionDb {
 // ── Evergreen ─────────────────────────────────────────────────────────────────
 
 impl SessionDb {
+    /// Save an evergreen chunk with all structured fields.
+    /// JSON arrays (`artefacts_json`, etc.) should be pre-serialised by the caller.
+    #[allow(clippy::too_many_arguments)]
     pub fn save_evergreen_chunk(
         &self,
         span_start_id: i64,
         span_end_id: i64,
-        summary: &str,
         tier: &str,
-        vital_refs: Option<&str>,
+        summary: &str,
+        goal: Option<&str>,
+        artefacts_json: &str,
+        errors_json: &str,
+        open_json: &str,
+        decided_json: &str,
+        constraints_json: &str,
+        sharp_edges_json: &str,
+        recall_note: Option<&str>,
     ) -> Result<i64> {
         let now = chrono::Utc::now().to_rfc3339();
         self.conn.execute(
             "INSERT INTO evergreen_chunks
-             (span_start_id, span_end_id, summary, tier, vital_refs, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![span_start_id, span_end_id, summary, tier, vital_refs, now],
+             (span_start_id, span_end_id, tier, summary,
+              goal, artefacts_json, errors_json, open_json,
+              decided_json, constraints_json, sharp_edges_json, recall_note,
+              created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
+            params![
+                span_start_id,
+                span_end_id,
+                tier,
+                summary,
+                goal,
+                artefacts_json,
+                errors_json,
+                open_json,
+                decided_json,
+                constraints_json,
+                sharp_edges_json,
+                recall_note,
+                now
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
 
     pub fn load_evergreen_chunks(&self) -> Result<Vec<EvergreenChunkRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, span_start_id, span_end_id, summary, vital_refs, tier, created_at
+            "SELECT id, span_start_id, span_end_id, tier, summary,
+                    goal, artefacts_json, open_json, sharp_edges_json, created_at
              FROM evergreen_chunks ORDER BY span_start_id ASC",
         )?;
         let rows = stmt
             .query_map([], |row| {
+                let artefacts_json: String = row.get::<_, Option<String>>(6)?.unwrap_or_default();
+                let open_json: String = row.get::<_, Option<String>>(7)?.unwrap_or_default();
+                let sharp_json: String = row.get::<_, Option<String>>(8)?.unwrap_or_default();
                 Ok(EvergreenChunkRow {
                     id: row.get(0)?,
                     span_start_id: row.get(1)?,
                     span_end_id: row.get(2)?,
-                    summary: row.get(3)?,
-                    vital_refs: row.get(4)?,
                     tier: row
-                        .get::<_, Option<String>>(5)?
+                        .get::<_, Option<String>>(3)?
                         .unwrap_or_else(|| "hot".to_string()),
-                    created_at: row.get(6)?,
+                    summary: row.get(4)?,
+                    goal: row.get(5)?,
+                    artefacts: serde_json::from_str(&artefacts_json).unwrap_or_default(),
+                    open_items: serde_json::from_str(&open_json).unwrap_or_default(),
+                    sharp_edges: serde_json::from_str(&sharp_json).unwrap_or_default(),
+                    created_at: row.get(9)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -531,8 +591,21 @@ mod tests {
             .save_message("assistant", "msg2", "2026-04-11T10:00:01Z", Some(100))
             .unwrap();
         db.mark_messages_compressed(id1, id2).unwrap();
-        db.save_evergreen_chunk(id1, id2, "Summary of msgs 1-2", "hot", None)
-            .unwrap();
+        db.save_evergreen_chunk(
+            id1,
+            id2,
+            "hot",
+            "Summary of msgs 1-2",
+            Some("test goal"),
+            "[]",
+            "[]",
+            "[]",
+            "[]",
+            "[]",
+            "[]",
+            None,
+        )
+        .unwrap();
 
         let chunks = db.load_evergreen_chunks().unwrap();
         assert_eq!(chunks.len(), 1);

@@ -260,7 +260,15 @@ async fn maybe_compress(
         return Ok(());
     }
 
-    // ── Phase 3: write results back to the DB and refresh recall context ──────
+    // ── Phase 3: parse structured fields, write to DB, refresh recall ────────
+
+    let parsed = one_core::evergreen::parse_sections(&summary);
+    let artefacts_json = serde_json::to_string(&parsed.artefacts).unwrap_or_default();
+    let errors_json = serde_json::to_string(&parsed.errors).unwrap_or_default();
+    let open_json = serde_json::to_string(&parsed.open_items).unwrap_or_default();
+    let decided_json = serde_json::to_string(&parsed.decided).unwrap_or_default();
+    let constraints_json = serde_json::to_string(&parsed.constraints).unwrap_or_default();
+    let sharp_edges_json = serde_json::to_string(&parsed.sharp_edges).unwrap_or_default();
 
     let turns_compressed = span.turns.len();
     let span_start_id = span.span_start_id;
@@ -268,23 +276,42 @@ async fn maybe_compress(
     let db_path3 = db_path.clone();
     let summary3 = summary.clone();
     let tier3 = tier.to_string();
+    let goal3 = parsed.goal.clone();
+    let recall_note3 = parsed.recall_note.clone();
 
     let all_chunks = tokio::task::spawn_blocking(move || {
         let db = SessionDb::open(&db_path3)?;
-        db.save_evergreen_chunk(span_start_id, span_end_id, &summary3, &tier3, None)?;
+        db.save_evergreen_chunk(
+            span_start_id,
+            span_end_id,
+            &tier3,
+            &summary3,
+            goal3.as_deref(),
+            &artefacts_json,
+            &errors_json,
+            &open_json,
+            &decided_json,
+            &constraints_json,
+            &sharp_edges_json,
+            recall_note3.as_deref(),
+        )?;
         db.mark_messages_compressed(span_start_id, span_end_id)?;
-        // Return all chunks so we can rebuild the recall context in-memory.
         db.load_evergreen_chunks()
     })
     .await??;
 
-    // Update the session's in-memory recall context so the next API call picks it up.
+    // Rebuild recall context with BM25-aware builder (no query at this stage —
+    // full context; query-time filtering happens in build_system_prompt).
     let recall = {
-        let pairs: Vec<(&str, &str)> = all_chunks
+        let chunks: Vec<one_core::evergreen::RecallChunk<'_>> = all_chunks
             .iter()
-            .map(|c| (c.tier.as_str(), c.summary.as_str()))
+            .map(|c| one_core::evergreen::RecallChunk {
+                tier: c.tier.as_str(),
+                summary: c.summary.as_str(),
+                artefacts: &c.artefacts,
+            })
             .collect();
-        one_core::evergreen::build_recall_context(&pairs)
+        one_core::evergreen::build_recall_context(&chunks, None)
     };
     {
         let mut s = state.write().await;

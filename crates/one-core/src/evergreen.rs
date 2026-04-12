@@ -206,6 +206,232 @@ pub fn estimate_tokens(content: &str) -> u64 {
     (content.len() as u64).div_ceil(4)
 }
 
+// ── Section parser ────────────────────────────────────────────────────────────
+
+/// Parsed fields extracted from a structured evergreen summary.
+/// Fields not present in the output are `None` / empty.
+#[derive(Debug, Clone, Default)]
+pub struct ParsedSections {
+    /// GOAL / SESSION_GOAL / PROJECT
+    pub goal: Option<String>,
+    /// STATE (hot only)
+    pub state: Option<String>,
+    /// APPROACH (warm only)
+    pub approach: Option<String>,
+    /// FINGERPRINT (cold only)
+    pub fingerprint: Option<String>,
+    /// ARTEFACTS / STABLE_ARTEFACTS / KEY_ARTEFACTS bullet list
+    pub artefacts: Vec<String>,
+    /// ERRORS bullet list
+    pub errors: Vec<String>,
+    /// OPEN bullet list
+    pub open_items: Vec<String>,
+    /// DECIDED bullet list
+    pub decided: Vec<String>,
+    /// CONSTRAINTS bullet list
+    pub constraints: Vec<String>,
+    /// SHARP_EDGES bullet list
+    pub sharp_edges: Vec<String>,
+    /// RECALL_GAPS / RECALL_NOTE text
+    pub recall_note: Option<String>,
+    /// RESOLVED text
+    pub resolved: Option<String>,
+}
+
+/// Parse a structured evergreen summary into discrete fields.
+///
+/// Looks for ALL_CAPS section headers at the start of a line (e.g. `GOAL:`)
+/// and extracts either the inline value or subsequent bullet list.
+pub fn parse_sections(text: &str) -> ParsedSections {
+    let mut sections = ParsedSections::default();
+
+    // Split text into (header, body) pairs.
+    // A header is a line matching /^[A-Z_]+:/.
+    let mut pairs: Vec<(&str, String)> = Vec::new();
+    let mut current_header: Option<&str> = None;
+    let mut current_body = String::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // Detect "WORD_WORD:" at start of line
+        let is_header = trimmed
+            .split_once(':')
+            .map(|(key, _)| {
+                !key.is_empty() && key.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+            })
+            .unwrap_or(false);
+
+        if is_header {
+            if let Some(h) = current_header {
+                pairs.push((h, current_body.trim().to_string()));
+            }
+            let (key, rest) = trimmed.split_once(':').unwrap();
+            current_header = Some(key);
+            current_body = rest.trim().to_string();
+        } else if current_header.is_some() {
+            if !current_body.is_empty() {
+                current_body.push('\n');
+            }
+            current_body.push_str(line);
+        }
+    }
+    if let Some(h) = current_header {
+        pairs.push((h, current_body.trim().to_string()));
+    }
+
+    // Map parsed pairs to fields.
+    for (header, body) in pairs {
+        match header {
+            "GOAL" | "SESSION_GOAL" | "PROJECT" => {
+                sections.goal = Some(body);
+            }
+            "STATE" => {
+                sections.state = Some(body);
+            }
+            "APPROACH" | "FINGERPRINT" => {
+                if header == "APPROACH" {
+                    sections.approach = Some(body.clone());
+                } else {
+                    sections.fingerprint = Some(body.clone());
+                }
+            }
+            "ARTEFACTS" | "STABLE_ARTEFACTS" | "KEY_ARTEFACTS" => {
+                sections.artefacts = extract_bullets(&body);
+            }
+            "ERRORS" => {
+                sections.errors = extract_bullets(&body);
+            }
+            "OPEN" => {
+                sections.open_items = extract_bullets(&body);
+            }
+            "DECIDED" => {
+                sections.decided = extract_bullets(&body);
+            }
+            "CONSTRAINTS" => {
+                sections.constraints = extract_bullets(&body);
+            }
+            "SHARP_EDGES" => {
+                sections.sharp_edges = extract_bullets(&body);
+            }
+            "RECALL_GAPS" | "RECALL_NOTE" => {
+                let bullets = extract_bullets(&body);
+                sections.recall_note = if bullets.is_empty() {
+                    Some(body)
+                } else {
+                    Some(bullets.join("; "))
+                };
+            }
+            "RESOLVED" => {
+                sections.resolved = Some(body);
+            }
+            _ => {}
+        }
+    }
+
+    sections
+}
+
+fn extract_bullets(text: &str) -> Vec<String> {
+    text.lines()
+        .map(|l| l.trim())
+        .filter(|l| l.starts_with("- ") || l.starts_with("* "))
+        .map(|l| l[2..].trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+// ── BM25 retrieval ────────────────────────────────────────────────────────────
+
+/// Tokenise text for BM25: lowercase, split on non-alphanumeric, drop short tokens.
+fn tokenise(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .map(|t| t.to_lowercase())
+        .filter(|t| t.len() > 2)
+        .collect()
+}
+
+/// BM25 relevance score for `query` against a single `document`.
+/// Uses corpus-level term frequencies from `all_docs`.
+/// k1=1.2, b=0.75 (standard defaults).
+fn bm25_score(
+    query_tokens: &[String],
+    doc_tokens: &[String],
+    avg_dl: f64,
+    n: usize,
+    df: &std::collections::HashMap<String, usize>,
+) -> f64 {
+    const K1: f64 = 1.2;
+    const B: f64 = 0.75;
+
+    let dl = doc_tokens.len() as f64;
+    let norm = 1.0 - B + B * dl / avg_dl.max(1.0);
+
+    let mut tf_map = std::collections::HashMap::<&str, usize>::new();
+    for t in doc_tokens {
+        *tf_map.entry(t.as_str()).or_insert(0) += 1;
+    }
+
+    query_tokens
+        .iter()
+        .map(|term| {
+            let tf = *tf_map.get(term.as_str()).unwrap_or(&0) as f64;
+            let df_t = *df.get(term).unwrap_or(&0) as f64;
+            let idf = ((n as f64 - df_t + 0.5) / (df_t + 0.5)).max(0.0).ln_1p();
+            let tf_norm = tf * (K1 + 1.0) / (tf + K1 * norm);
+            idf * tf_norm
+        })
+        .sum()
+}
+
+/// Rank chunk indices by BM25 relevance to `query`.
+/// Returns indices sorted descending by score (most relevant first).
+pub fn rank_by_relevance<'a>(query: &str, summaries: &'a [&'a str]) -> Vec<(usize, f64)> {
+    if summaries.is_empty() {
+        return Vec::new();
+    }
+
+    let query_tokens = tokenise(query);
+    let doc_tokens: Vec<Vec<String>> = summaries.iter().map(|s| tokenise(s)).collect();
+
+    let avg_dl = doc_tokens.iter().map(|d| d.len() as f64).sum::<f64>() / doc_tokens.len() as f64;
+
+    // Build document-frequency map
+    let mut df = std::collections::HashMap::<String, usize>::new();
+    for doc in &doc_tokens {
+        let unique: std::collections::HashSet<&str> = doc.iter().map(|s| s.as_str()).collect();
+        for term in unique {
+            *df.entry(term.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    let n = summaries.len();
+    let mut scored: Vec<(usize, f64)> = doc_tokens
+        .iter()
+        .enumerate()
+        .map(|(i, doc)| (i, bm25_score(&query_tokens, doc, avg_dl, n, &df)))
+        .collect();
+
+    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored
+}
+
+/// Check whether `query` mentions any of the known artefacts.
+/// Returns matched artefact strings (for use in retrieval).
+pub fn match_artefacts<'a>(query: &str, artefacts: &[&'a str]) -> Vec<&'a str> {
+    let q = query.to_lowercase();
+    artefacts
+        .iter()
+        .copied()
+        .filter(|a| {
+            let name = std::path::Path::new(a)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(a);
+            q.contains(&a.to_lowercase()) || q.contains(&name.to_lowercase())
+        })
+        .collect()
+}
+
 // ── Prompts ───────────────────────────────────────────────────────────────────
 
 /// Compression prompt for the **hot** tier (first-pass, recent turns).
@@ -312,18 +538,89 @@ than inferring.
 
 /// Build the recall context string from a list of `(tier, summary)` pairs
 /// (ordered oldest-first). Returns `None` if `chunks` is empty.
-pub fn build_recall_context(chunks: &[(&str, &str)]) -> Option<String> {
+/// A single chunk ready for recall injection.
+pub struct RecallChunk<'a> {
+    pub tier: &'a str,
+    pub summary: &'a str,
+    /// Artefacts extracted from the structured fields.
+    pub artefacts: &'a [String],
+}
+
+/// Build the recall context string, optionally filtered and ranked by `query`.
+///
+/// When `query` is supplied:
+/// 1. Any chunk whose artefacts overlap with the query is always included.
+/// 2. Remaining chunks are BM25-ranked; only the top-3 by relevance are included.
+/// 3. Cold/warm tiers are always included regardless of score.
+///
+/// When `query` is `None`, all chunks are included in tier order.
+pub fn build_recall_context(chunks: &[RecallChunk<'_>], query: Option<&str>) -> Option<String> {
     if chunks.is_empty() {
         return None;
     }
+
+    let selected: Vec<&RecallChunk<'_>> = if let Some(q) = query {
+        // Collect all artefact strings for matching.
+        let all_artefacts: Vec<&str> = chunks
+            .iter()
+            .flat_map(|c| c.artefacts.iter().map(|a| a.as_str()))
+            .collect();
+        let matched_artefacts = match_artefacts(q, &all_artefacts);
+
+        let mut include = vec![false; chunks.len()];
+
+        // Always include cold/warm and any chunk with a matching artefact.
+        for (i, chunk) in chunks.iter().enumerate() {
+            if chunk.tier != "hot" {
+                include[i] = true;
+            }
+            if chunk.artefacts.iter().any(|a| {
+                matched_artefacts
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case(a.as_str()))
+            }) {
+                include[i] = true;
+            }
+        }
+
+        // BM25-rank the remaining hot chunks; include top-3.
+        let hot_indices: Vec<usize> = chunks
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| c.tier == "hot" && !include[*i])
+            .map(|(i, _)| i)
+            .collect();
+
+        if !hot_indices.is_empty() {
+            let summaries: Vec<&str> = hot_indices.iter().map(|&i| chunks[i].summary).collect();
+            let ranked = rank_by_relevance(q, &summaries);
+            for (local_idx, _score) in ranked.into_iter().take(3) {
+                include[hot_indices[local_idx]] = true;
+            }
+        }
+
+        chunks
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| include[*i])
+            .map(|(_, c)| c)
+            .collect()
+    } else {
+        chunks.iter().collect()
+    };
+
+    if selected.is_empty() {
+        return None;
+    }
+
     let mut out = RECALL_PREAMBLE.to_string();
-    for (tier, summary) in chunks {
-        let label = match *tier {
+    for chunk in selected {
+        let label = match chunk.tier {
             "warm" => "WARM — session arc",
             "cold" => "COLD — landmark",
             _ => "HOT — recent context",
         };
-        out.push_str(&format!("\n--- {label} ---\n{summary}\n"));
+        out.push_str(&format!("\n--- {label} ---\n{}\n", chunk.summary));
     }
     Some(out)
 }
