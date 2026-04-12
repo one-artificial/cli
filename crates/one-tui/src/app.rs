@@ -2597,18 +2597,17 @@ impl App {
                         TurnRole::ToolResult => {
                             if !turn.content.is_empty() {
                                 let dim = Style::default().add_modifier(Modifier::DIM);
-                                for line in turn.content.lines().take(6) {
+                                let total = turn.content.lines().count();
+                                for line in turn.content.lines().take(5) {
+                                    let truncated = truncate_line(line, 120);
                                     result.push(Line::from(Span::styled(
-                                        format!("  \u{23bf}  {line}"),
+                                        format!("  \u{23bf}  {truncated}"),
                                         dim,
                                     )));
                                 }
-                                if turn.content.lines().count() > 6 {
+                                if total > 5 {
                                     result.push(Line::from(Span::styled(
-                                        format!(
-                                            "  \u{23bf}  \u{2026} +{} more lines",
-                                            turn.content.lines().count() - 6
-                                        ),
+                                        format!("  \u{23bf}  \u{2026} +{} more lines", total - 5),
                                         dim,
                                     )));
                                 }
@@ -2707,13 +2706,13 @@ impl App {
                                         if lines.is_empty() {
                                             result.push(out_line("(No output)"));
                                         } else {
-                                            for l in lines.iter().take(6) {
-                                                result.push(out_line(l));
+                                            for l in lines.iter().take(5) {
+                                                result.push(out_line(&truncate_line(l, 120)));
                                             }
-                                            if lines.len() > 6 {
+                                            if lines.len() > 5 {
                                                 result.push(out_line(&format!(
                                                     "\u{2026} +{} more lines",
-                                                    lines.len() - 6
+                                                    lines.len() - 5
                                                 )));
                                             }
                                         }
@@ -2733,7 +2732,7 @@ impl App {
                                             result.push(out_line(s));
                                         }
                                         let remaining: Vec<&str> = lines_iter.collect();
-                                        for line in remaining.iter().take(16) {
+                                        for line in remaining.iter().take(5) {
                                             let marker = line.get(6..8).unwrap_or("  ");
                                             let style = match marker {
                                                 " +" => Style::default().fg(Color::Green),
@@ -2745,10 +2744,10 @@ impl App {
                                                 style,
                                             )));
                                         }
-                                        if remaining.len() > 16 {
+                                        if remaining.len() > 5 {
                                             result.push(out_line(&format!(
                                                 "\u{2026} +{} more lines",
-                                                remaining.len() - 16
+                                                remaining.len() - 5
                                             )));
                                         }
                                     }
@@ -3418,6 +3417,16 @@ fn longest_common_prefix(strings: &[String]) -> Option<String> {
         )
     } else {
         None
+    }
+}
+
+/// Truncate a single line to `max_chars` characters, appending `…` if cut.
+fn truncate_line(line: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.len() <= max_chars {
+        line.to_string()
+    } else {
+        chars[..max_chars].iter().collect::<String>() + "…"
     }
 }
 
