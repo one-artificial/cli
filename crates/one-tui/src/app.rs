@@ -2537,9 +2537,6 @@ impl App {
                 );
 
                 let debug_mode = snapshot.debug_mode;
-                let debug_dim = Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::DIM);
                 let mut dbg_idx = 0usize;
 
                 for turn in &session.conversation.turns {
@@ -2548,10 +2545,9 @@ impl App {
                         while dbg_idx < session.debug_events.len()
                             && session.debug_events[dbg_idx].0 <= turn.timestamp
                         {
-                            result.push(Line::from(Span::styled(
-                                format!("  \u{2812} {}", session.debug_events[dbg_idx].1),
-                                debug_dim,
-                            )));
+                            result.push(crate::render::debug_event_line(
+                                &session.debug_events[dbg_idx].1,
+                            ));
                             dbg_idx += 1;
                         }
                     }
@@ -2568,260 +2564,63 @@ impl App {
 
                     match turn.role {
                         TurnRole::User => {
-                            // User: "> message"
-                            result.push(Line::from(""));
-                            for line in turn.content.lines() {
-                                result.push(Line::from(Span::styled(
-                                    format!("> {line}"),
-                                    Style::default()
-                                        .fg(Color::White)
-                                        .add_modifier(Modifier::BOLD),
-                                )));
-                            }
-                            result.push(Line::from(""));
+                            result.extend(crate::render::user_turn(&turn.content));
                         }
                         TurnRole::Assistant => {
-                            // Assistant: "⏺ content" (markdown rendered)
                             if !turn.content.is_empty() {
-                                let md_lines = crate::markdown::render_markdown(&turn.content);
-                                for (i, line) in md_lines.into_iter().enumerate() {
-                                    if i == 0 {
-                                        // Prepend dot to first line
-                                        let mut spans = vec![dot.clone()];
-                                        spans.extend(line.spans);
-                                        result.push(Line::from(spans));
-                                    } else {
-                                        result.push(line);
-                                    }
-                                }
+                                result.extend(crate::render::assistant_text(
+                                    &turn.content,
+                                    dot.clone(),
+                                ));
                             }
                         }
                         TurnRole::System => {
-                            for line in turn.content.lines() {
-                                result.push(Line::from(Span::styled(
-                                    line.to_string(),
-                                    Style::default().fg(Color::DarkGray),
-                                )));
-                            }
+                            result.extend(crate::render::system_turn(&turn.content));
                         }
                         TurnRole::ToolResult => {
-                            if !turn.content.is_empty() {
-                                let dim = Style::default().add_modifier(Modifier::DIM);
-                                let total = turn.content.lines().count();
-                                for line in turn.content.lines().take(5) {
-                                    let truncated = truncate_line(line, 120);
-                                    result.push(Line::from(Span::styled(
-                                        format!("  \u{23bf}  {truncated}"),
-                                        dim,
-                                    )));
-                                }
-                                if total > 5 {
-                                    result.push(Line::from(Span::styled(
-                                        format!("  \u{23bf}  \u{2026} +{} more lines", total - 5),
-                                        dim,
-                                    )));
-                                }
-                            }
+                            result.extend(crate::render::tool_result_turn(&turn.content));
                         }
                     }
 
-                    // Tool calls: "⏺ ToolName(args)" with output below
+                    // Tool calls on assistant turns
                     if turn.role == TurnRole::Assistant && !turn.tool_calls.is_empty() {
                         for tc in &turn.tool_calls {
-                            let face_name = match tc.tool_name.as_str() {
-                                "Edit" => "Update",
-                                "Glob" => "Search",
-                                _ => &tc.tool_name,
-                            };
-                            let display = if tc.input_summary.is_empty() {
-                                face_name.to_string()
-                            } else {
-                                format!("{face_name}({})", tc.input_summary)
-                            };
-                            let dim = Style::default().add_modifier(Modifier::DIM);
-                            // Tool header: animated while running, ⏺ once complete.
-                            // Style is picked per-tool from spinner_tick at ToolRequest time.
-                            let header_dot = if tc.output.is_none() {
-                                const GROWING: &[&str] =
-                                    &["\u{00b7}", "\u{2022}", "\u{25cf}", "\u{2022}", "\u{00b7}"];
-                                const FALLING_SAND: &[&str] = &[
-                                    "⠁", "⠂", "⠄", "⡀", "⡈", "⡐", "⡠", "⣀", "⣁", "⣂", "⣄", "⣌",
-                                    "⣔", "⣤", "⣥", "⣦", "⣮", "⣶", "⣷", "⣿", "⡿", "⠿", "⢟", "⠟",
-                                    "⡛", "⠛", "⠫", "⢋", "⠋", "⠍", "⡉", "⠉", "⠑", "⠡", "⢁",
-                                ];
-                                const FOLD: &[&str] = &["-", "≻", "›", "⟩", "|", "⟨", "‹", "≺"];
-                                const BOX_BOUNCE: &[&str] = &["▖", "▘", "▝", "▗"];
-                                const BRAILLE: &[&str] =
-                                    &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                                let frames: &[&str] = match tc.dot_style % 5 {
-                                    0 => GROWING,
-                                    1 => FALLING_SAND,
-                                    2 => FOLD,
-                                    3 => BOX_BOUNCE,
-                                    _ => BRAILLE,
-                                };
-                                let d = frames[self.spinner_tick as usize % frames.len()];
-                                Span::styled(
-                                    format!("{d} "),
-                                    Style::default().fg(dot_color).add_modifier(Modifier::DIM),
-                                )
-                            } else {
-                                dot.clone()
-                            };
-                            result.push(Line::from(vec![
-                                header_dot,
-                                Span::styled(
-                                    display,
-                                    Style::default().add_modifier(Modifier::BOLD),
-                                ),
-                            ]));
-                            // Tool output: "  ⎿  content"
+                            result.push(crate::render::tool_header(
+                                &tc.tool_name,
+                                &tc.input_summary,
+                                tc.output.is_none(),
+                                tc.dot_style,
+                                self.spinner_tick as usize,
+                                dot_color,
+                                dot.clone(),
+                            ));
                             if tc.output.is_none() {
-                                // Pending — tool is still running
-                                result.push(Line::from(Span::styled(
-                                    "  \u{23bf}  running\u{2026}",
-                                    Style::default()
-                                        .fg(Color::Yellow)
-                                        .add_modifier(Modifier::DIM),
-                                )));
-                            } else if let Some(ref output) = tc.output
-                                && output.trim().is_empty()
-                            {
-                                // Completed with no output
-                                result.push(Line::from(vec![
-                                    Span::styled("  \u{23bf}  ", dim),
-                                    Span::styled("(No output)", dim),
-                                ]));
-                            } else if let Some(ref output) = tc.output
-                                && !output.is_empty()
-                            {
-                                let out_line = |text: &str| {
-                                    Line::from(vec![
-                                        Span::styled("  \u{23bf}  ", dim),
-                                        Span::styled(text.to_string(), dim),
-                                    ])
-                                };
-
-                                match tc.tool_name.as_str() {
-                                    "Read" => {
-                                        let count = output.lines().count();
-                                        result.push(out_line(&format!("{count} lines")));
-                                    }
-                                    "Write" => {
-                                        let first = output.lines().next().unwrap_or("Done");
-                                        result.push(out_line(first));
-                                    }
-                                    "Bash" => {
-                                        let lines: Vec<&str> = output.lines().collect();
-                                        if lines.is_empty() {
-                                            result.push(out_line("(No output)"));
-                                        } else {
-                                            for l in lines.iter().take(5) {
-                                                result.push(out_line(&truncate_line(l, 120)));
-                                            }
-                                            if lines.len() > 5 {
-                                                result.push(out_line(&format!(
-                                                    "\u{2026} +{} more lines",
-                                                    lines.len() - 5
-                                                )));
-                                            }
-                                        }
-                                    }
-                                    "Grep" | "Glob" => {
-                                        let count = output.lines().count();
-                                        let unit = if tc.tool_name == "Grep" {
-                                            "results"
-                                        } else {
-                                            "files"
-                                        };
-                                        result.push(out_line(&format!("Found {count} {unit}")));
-                                    }
-                                    "Edit" => {
-                                        let mut lines_iter = output.lines();
-                                        if let Some(s) = lines_iter.next() {
-                                            result.push(out_line(s));
-                                        }
-                                        let remaining: Vec<&str> = lines_iter.collect();
-                                        for line in remaining.iter().take(5) {
-                                            let marker = line.get(6..8).unwrap_or("  ");
-                                            let style = match marker {
-                                                " +" => Style::default().fg(Color::Green),
-                                                " -" => Style::default().fg(Color::Red),
-                                                _ => dim,
-                                            };
-                                            result.push(Line::from(Span::styled(
-                                                format!("      {line}"),
-                                                style,
-                                            )));
-                                        }
-                                        if remaining.len() > 5 {
-                                            result.push(out_line(&format!(
-                                                "\u{2026} +{} more lines",
-                                                remaining.len() - 5
-                                            )));
-                                        }
-                                    }
-                                    "web_fetch" => {
-                                        let chars = output.chars().count();
-                                        result.push(out_line(&format!(
-                                            "Fetched {} chars",
-                                            fmt_count(chars)
-                                        )));
-                                    }
-                                    "web_search" => {
-                                        // Count result entries (each starts with a URL line)
-                                        let count = output
-                                            .lines()
-                                            .filter(|l| l.starts_with("URL:"))
-                                            .count();
-                                        if count > 0 {
-                                            result.push(out_line(&format!(
-                                                "Found {count} result(s)"
-                                            )));
-                                        } else {
-                                            result.push(out_line(
-                                                output.lines().next().unwrap_or("No results"),
-                                            ));
-                                        }
-                                    }
-                                    _ => {
-                                        if tc.is_error {
-                                            let first = output.lines().next().unwrap_or("Error");
-                                            result.push(Line::from(vec![
-                                                Span::styled("  \u{23bf}  ", dim),
-                                                Span::styled(
-                                                    truncate_line(first, 120),
-                                                    Style::default().fg(Color::Red),
-                                                ),
-                                            ]));
-                                        } else {
-                                            let first = output.lines().next().unwrap_or("Done");
-                                            result.push(out_line(&truncate_line(first, 120)));
-                                        }
-                                    }
-                                }
+                                result.push(crate::render::tool_running_line());
+                            } else if let Some(ref output) = tc.output {
+                                result.extend(crate::render::tool_output(
+                                    &tc.tool_name,
+                                    output,
+                                    tc.is_error,
+                                ));
                             }
                         }
-                        result.push(Line::from(""));
+                        result.push(Line::from("")); // blank line after tool block
                     }
                 }
 
-                // Debug events that arrived after all turns (most recent activity)
+                // Debug events that arrived after all turns
                 if debug_mode {
                     while dbg_idx < session.debug_events.len() {
-                        result.push(Line::from(Span::styled(
-                            format!("  \u{2812} {}", session.debug_events[dbg_idx].1),
-                            debug_dim,
-                        )));
+                        result.push(crate::render::debug_event_line(
+                            &session.debug_events[dbg_idx].1,
+                        ));
                         dbg_idx += 1;
                     }
                 }
 
-                // ── Streaming / tool-execution status line ────────────
+                // ── Status line ────────────────────────────────────────
                 let is_streaming = session.conversation.last_is_streaming();
                 let tool_running = session.active_tool.is_some();
-                // is_between_tools: ToolResult landed but next AiResponseChunk hasn't
-                // fired yet — the engine is preparing the next API call.
                 let is_processing =
                     (is_streaming && self.stream_started.is_none()) || self.is_between_tools;
 
@@ -2832,68 +2631,36 @@ impl App {
                         .as_deref()
                         .map(|e| format!(" \u{00b7} {e} effort"))
                         .unwrap_or_default();
-                    const GROWING: &[&str] =
-                        &["\u{00b7}", "\u{2022}", "\u{25cf}", "\u{2022}", "\u{00b7}"];
-                    const FALLING_SAND: &[&str] = &[
-                        "⠁", "⠂", "⠄", "⡀", "⡈", "⡐", "⡠", "⣀", "⣁", "⣂", "⣄", "⣌", "⣔", "⣤", "⣥",
-                        "⣦", "⣮", "⣶", "⣷", "⣿", "⡿", "⠿", "⢟", "⠟", "⡛", "⠛", "⠫", "⢋", "⠋", "⠍",
-                        "⡉", "⠉", "⠑", "⠡", "⢁",
-                    ];
-                    const FOLD: &[&str] = &["-", "≻", "›", "⟩", "|", "⟨", "‹", "≺"];
-                    const BOX_BOUNCE: &[&str] = &["▖", "▘", "▝", "▗"];
-                    const BRAILLE: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-                    let frames: &[&str] = match self.processing_dot_style % 5 {
-                        0 => GROWING,
-                        1 => FALLING_SAND,
-                        2 => FOLD,
-                        3 => BOX_BOUNCE,
-                        _ => BRAILLE,
-                    };
-                    let spinner = frames[self.spinner_tick as usize % frames.len()];
-                    let spinner_span = Span::styled(
-                        format!("{spinner} "),
-                        Style::default().fg(dot_color).add_modifier(Modifier::DIM),
+                    let spinner = crate::render::spinner_char(
+                        self.processing_dot_style,
+                        self.spinner_tick as usize,
                     );
-                    let verb_span = Span::styled(
-                        format!("{verb}\u{2026}"),
-                        Style::default().fg(dot_color).add_modifier(Modifier::BOLD),
-                    );
-
-                    if is_processing {
-                        // Waiting for first token — model is processing the request
-                        result.push(Line::from(vec![spinner_span, verb_span]));
+                    let elapsed_str = if tool_running && !is_streaming {
+                        self.tool_exec_started
+                            .map(|s| {
+                                let secs = s.elapsed().as_secs();
+                                if secs >= 60 {
+                                    format!("{}m {:02}s", secs / 60, secs % 60)
+                                } else {
+                                    format!("{}s", secs)
+                                }
+                            })
+                            .unwrap_or_else(|| "0s".to_string())
                     } else {
-                        // Receiving tokens or tool running — show elapsed + token stats
-                        let elapsed_str = if tool_running && !is_streaming {
-                            // Tool execution: use per-tool timer
-                            self.tool_exec_started
-                                .map(|s| {
-                                    let secs = s.elapsed().as_secs();
-                                    if secs >= 60 {
-                                        format!("{}m {:02}s", secs / 60, secs % 60)
-                                    } else {
-                                        format!("{}s", secs)
-                                    }
-                                })
-                                .unwrap_or_else(|| "0s".to_string())
-                        } else {
-                            elapsed_str
-                        };
-                        result.push(Line::from(vec![
-                            spinner_span,
-                            verb_span,
-                            Span::styled(
-                                format!(" ({elapsed_str} \u{00b7} {tokens_str}{effort_suffix})"),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                        ]));
-                        result.push(Line::from(vec![
-                            Span::styled("  \u{23bf}  ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(
-                                format!("Tip: {tip}"),
-                                Style::default().fg(Color::DarkGray),
-                            ),
-                        ]));
+                        elapsed_str
+                    };
+                    if is_processing {
+                        result.push(crate::render::status_processing(spinner, verb, dot_color));
+                    } else {
+                        result.extend(crate::render::status_active(
+                            spinner,
+                            verb,
+                            &elapsed_str,
+                            &tokens_str,
+                            &effort_suffix,
+                            tip,
+                            dot_color,
+                        ));
                     }
                     result.push(Line::from(""));
                 }
@@ -3453,27 +3220,6 @@ fn longest_common_prefix(strings: &[String]) -> Option<String> {
         )
     } else {
         None
-    }
-}
-
-/// Format a character/byte count as "1,234" or "12.3k".
-fn fmt_count(n: usize) -> String {
-    if n < 10_000 {
-        format!("{n}")
-    } else if n < 1_000_000 {
-        format!("{:.1}k", n as f64 / 1000.0)
-    } else {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
-    }
-}
-
-/// Truncate a single line to `max_chars` characters, appending `…` if cut.
-fn truncate_line(line: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = line.chars().collect();
-    if chars.len() <= max_chars {
-        line.to_string()
-    } else {
-        chars[..max_chars].iter().collect::<String>() + "…"
     }
 }
 

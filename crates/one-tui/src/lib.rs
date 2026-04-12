@@ -5,6 +5,7 @@ pub mod input;
 pub mod markdown;
 pub mod onboarding;
 pub mod pet;
+pub mod render;
 pub mod tabs;
 pub mod theme;
 pub mod widgets;
