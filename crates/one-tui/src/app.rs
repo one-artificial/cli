@@ -295,14 +295,7 @@ impl App {
                             "Read" => input["file_path"].as_str().unwrap_or("").to_string(),
                             "Write" => input["file_path"].as_str().unwrap_or("").to_string(),
                             "Edit" => input["file_path"].as_str().unwrap_or("").to_string(),
-                            "Bash" => {
-                                let cmd = input["command"].as_str().unwrap_or("");
-                                if cmd.len() > 60 {
-                                    format!("{}...", &cmd[..60])
-                                } else {
-                                    cmd.to_string()
-                                }
-                            }
+                            "Bash" => input["command"].as_str().unwrap_or("").to_string(),
                             "Grep" => input["pattern"].as_str().unwrap_or("").to_string(),
                             "Glob" => input["pattern"].as_str().unwrap_or("").to_string(),
                             _ => String::new(),
@@ -2587,7 +2580,7 @@ impl App {
                     // Tool calls on assistant turns
                     if turn.role == TurnRole::Assistant && !turn.tool_calls.is_empty() {
                         for tc in &turn.tool_calls {
-                            result.push(crate::render::tool_header(
+                            result.extend(crate::render::tool_header(
                                 &tc.tool_name,
                                 &tc.input_summary,
                                 tc.output.is_none(),

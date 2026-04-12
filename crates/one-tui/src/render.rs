@@ -147,11 +147,12 @@ pub fn debug_event_line(message: &str) -> Line<'static> {
 
 // ── Tool call renderers ───────────────────────────────────────────────────────
 
-/// Tool header line: animated dot while running, static `⏺` when done.
+/// Tool header — up to 2 wrapped lines, front-truncated if needed.
 ///
 /// ```text
-/// · Bash(cargo test)      ← running
-/// ⏺ Bash(cargo test)      ← complete
+/// · Bash(cd /long/path && cargo test)    ← fits on one line
+/// ⏺ Bash(cd /very/long/path/that/wraps
+///         && cargo test --workspace)     ← two lines
 /// ```
 pub fn tool_header(
     tool_name: &str,
@@ -161,16 +162,11 @@ pub fn tool_header(
     tick: usize,
     color: Color,
     static_dot: Span<'static>,
-) -> Line<'static> {
+) -> Vec<Line<'static>> {
     let face = match tool_name {
         "Edit" => "Update",
         "Glob" => "Search",
         other => other,
-    };
-    let label = if input_summary.is_empty() {
-        face.to_string()
-    } else {
-        format!("{face}({input_summary})")
     };
 
     let dot = if is_running {
@@ -182,10 +178,64 @@ pub fn tool_header(
         static_dot
     };
 
-    Line::from(vec![
-        dot,
-        Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
-    ])
+    let bold = Style::default().add_modifier(Modifier::BOLD);
+    const MAX_COLS: usize = 78;
+
+    if input_summary.is_empty() {
+        return vec![Line::from(vec![dot, Span::styled(face.to_string(), bold)])];
+    }
+
+    // Prefix: "ToolName(" — its char length determines space left for the arg
+    let prefix = format!("{face}(");
+    let suffix = ")";
+    let prefix_len = prefix.chars().count() + 2; // 2 = dot + space
+    let available = MAX_COLS.saturating_sub(prefix_len);
+
+    let chars: Vec<char> = input_summary.chars().collect();
+
+    if chars.len() <= available + MAX_COLS {
+        // Fits in 1 or 2 lines — split at `available` chars
+        if chars.len() <= available {
+            vec![Line::from(vec![
+                dot,
+                Span::styled(format!("{prefix}{input_summary}{suffix}"), bold),
+            ])]
+        } else {
+            // Line 1: prefix + first chunk
+            let line1_arg: String = chars[..available].iter().collect();
+            // Line 2: indented continuation — front-truncate if still too long
+            let rest: String = chars[available..].iter().collect();
+            let rest_max = MAX_COLS.saturating_sub(4); // 4 = "    " indent
+            let rest_display = if rest.chars().count() > rest_max {
+                let start = rest.chars().count() - rest_max;
+                format!("…{}", rest.chars().skip(start).collect::<String>())
+            } else {
+                rest
+            };
+            vec![
+                Line::from(vec![
+                    dot,
+                    Span::styled(format!("{prefix}{line1_arg}"), bold),
+                ]),
+                Line::from(Span::styled(format!("    {rest_display}{suffix}"), bold)),
+            ]
+        }
+    } else {
+        // Too long even for 2 lines — keep the tail (most recent part)
+        let keep = available + MAX_COLS.saturating_sub(4);
+        let start = chars.len().saturating_sub(keep);
+        let truncated: String = chars[start..].iter().collect();
+        let mid = available.min(truncated.chars().count());
+        let line1_arg: String = truncated.chars().take(mid).collect();
+        let rest: String = truncated.chars().skip(mid).collect();
+        vec![
+            Line::from(vec![
+                dot,
+                Span::styled(format!("{prefix}…{line1_arg}"), bold),
+            ]),
+            Line::from(Span::styled(format!("    {rest}{suffix}"), bold)),
+        ]
+    }
 }
 
 /// Tool output lines below the header.
