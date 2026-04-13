@@ -84,10 +84,10 @@ pub struct App {
     provider_picker: Option<ProviderPickerState>,
     /// Session import picker (/import command)
     import_picker: Option<ImportPickerState>,
+    /// User-configurable keybindings (loaded from ~/.one/keybindings.json)
+    keybindings: one_core::keybindings::KeybindingConfig,
     /// Spinner animation tick (cycles through frames)
     spinner_tick: u8,
-    /// Pending close-session confirmation (true = waiting for y/n)
-    close_confirm: bool,
     /// When the current stream started (for elapsed time display)
     stream_started: Option<std::time::Instant>,
     /// Index into thinking verbs — rotates every ~4 seconds
@@ -136,8 +136,8 @@ impl App {
             permission_prompt: None,
             provider_picker: None,
             import_picker: None,
+            keybindings: one_core::keybindings::KeybindingConfig::load(),
             spinner_tick: 0,
-            close_confirm: false,
             stream_started: None,
             tool_exec_started: None,
             is_between_tools: false,
@@ -179,7 +179,10 @@ impl App {
         crossterm::execute!(
             stdout,
             EnterAlternateScreen,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+            )
         )?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
@@ -682,35 +685,6 @@ impl App {
                     continue;
                 }
 
-                // Handle close-session confirmation (y/n)
-                if self.close_confirm {
-                    if let CrosstermEvent::Key(key) = crossterm_event {
-                        match key.code {
-                            KeyCode::Char('y') | KeyCode::Enter => {
-                                self.close_confirm = false;
-                                self.input.clear_placeholder();
-                                let mut s = self.state.write().await;
-                                if let Some(sid) = s.active_session_id.clone() {
-                                    s.sessions.remove(&sid);
-                                    s.active_session_id = s.sessions.keys().next().cloned();
-                                }
-                                self.tabs = crate::tabs::TabManager::new();
-                                let s = self.state.read().await;
-                                for (id, session) in &s.sessions {
-                                    self.tabs
-                                        .add_session(session.project_name.clone(), id.clone());
-                                }
-                            }
-                            _ => {
-                                // Any other key cancels
-                                self.close_confirm = false;
-                                self.input.clear_placeholder();
-                            }
-                        }
-                    }
-                    continue;
-                }
-
                 // Transcript mode input — intercepts all keys
                 if self.transcript_mode {
                     if let CrosstermEvent::Key(key) = crossterm_event {
@@ -768,84 +742,502 @@ impl App {
                     self.last_ctrl_c = None;
                 }
 
-                match (key.modifiers, key.code) {
-                    (KeyModifiers::CONTROL, KeyCode::Char('c')) => {
-                        // Priority: clear input / exit bash mode → cancel stream → double-tap exit
-                        if self.bash_mode || !self.input.value().is_empty() {
-                            self.bash_mode = false;
-                            self.input.delete_line();
-                        } else {
-                            // Check if streaming — cancel it
-                            let was_streaming = {
-                                let mut state = self.state.write().await;
-                                if let Some(session) = state.active_session_mut() {
-                                    if session.conversation.last_is_streaming() {
-                                        session.conversation.finish_current(None);
-                                        session.active_tool = None;
-                                        self.stream_started = None;
-                                        true
-                                    } else {
-                                        false
-                                    }
-                                } else {
-                                    false
-                                }
-                            };
-                            if !was_streaming {
-                                let now = std::time::Instant::now();
-                                if let Some(last) = self.last_ctrl_c
-                                    && now.duration_since(last).as_millis() < 2000
-                                {
-                                    let _ = self.event_tx.send(Event::Quit);
-                                    return Ok(());
-                                }
-                                self.last_ctrl_c = Some(now);
-                                self.input.set_placeholder("Press Ctrl+C again to exit");
-                            }
+                use one_core::keybindings::Action;
+                match self.keybindings.action_for(key.code, key.modifiers) {
+                    Some(Action::Submit) => {
+                        if self.handle_submit().await {
+                            continue;
                         }
                     }
-                    // Tab navigation: Ctrl+N or Ctrl+Shift+]
-                    (KeyModifiers::CONTROL, KeyCode::Char('n')) => {
+                    Some(Action::Cancel) => {
+                        if self.handle_cancel().await {
+                            return Ok(());
+                        }
+                    }
+                    Some(Action::Newline) => {
+                        self.input.insert('\n');
+                    }
+                    Some(Action::Clear) => {
+                        self.messages_scroll = 0;
+                    }
+                    Some(Action::ScrollUp) => {
+                        self.messages_scroll = self.messages_scroll.saturating_add(10);
+                    }
+                    Some(Action::ScrollDown) => {
+                        self.messages_scroll = self.messages_scroll.saturating_sub(10);
+                    }
+                    Some(Action::TabNext) => {
                         let new_sid = self.tabs.select_next().map(String::from);
                         let mut state = self.state.write().await;
                         state.active_session_id = new_sid;
                         self.messages_scroll = 0;
                     }
-                    (m, KeyCode::Char(']'))
-                        if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
-                    {
-                        let new_sid = self.tabs.select_next().map(String::from);
-                        let mut state = self.state.write().await;
-                        state.active_session_id = new_sid;
-                        self.messages_scroll = 0;
-                    }
-                    // Tab navigation: Ctrl+P or Ctrl+Shift+[
-                    (KeyModifiers::CONTROL, KeyCode::Char('p')) => {
+                    Some(Action::TabPrev) => {
                         let new_sid = self.tabs.previous().map(String::from);
                         let mut state = self.state.write().await;
                         state.active_session_id = new_sid;
                         self.messages_scroll = 0;
                     }
-                    (m, KeyCode::Char('['))
-                        if m.contains(KeyModifiers::CONTROL) && m.contains(KeyModifiers::SHIFT) =>
-                    {
-                        let new_sid = self.tabs.previous().map(String::from);
-                        let mut state = self.state.write().await;
-                        state.active_session_id = new_sid;
-                        self.messages_scroll = 0;
+                    Some(Action::Interrupt) => {
+                        if self.bash_mode {
+                            self.bash_mode = false;
+                            self.input.delete_line();
+                        } else if self.help_open {
+                            self.help_open = false;
+                        } else if self.onemed_open {
+                            self.onemed_open = false;
+                            self.onemed_content = None;
+                        } else if self.autocomplete.visible {
+                            self.autocomplete.visible = false;
+                        } else {
+                            let mut state = self.state.write().await;
+                            if let Some(session) = state.active_session_mut()
+                                && session.conversation.last_is_streaming()
+                            {
+                                session.conversation.finish_current(None);
+                                session.active_tool = None;
+                            }
+                            drop(state);
+                            self.input.handle_vim_escape();
+                        }
                     }
-                    // New session: Ctrl+T
-                    (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
-                        let project_path = {
+                    Some(Action::Autocomplete) => {
+                        if self.bash_mode {
+                            let working_dir = {
+                                let s = self.state.read().await;
+                                s.active_session()
+                                    .map(|s| s.cwd.clone())
+                                    .unwrap_or_else(|| ".".to_string())
+                            };
+                            let raw = self.input.value().to_string();
+                            if let Some(completed) = shell_tab_complete(&raw, &working_dir) {
+                                self.input.set_value(completed);
+                            }
+                        } else if let Some(val) =
+                            self.autocomplete.accept_with_input(self.input.value())
+                        {
+                            self.input.set_value(val);
+                            self.autocomplete
+                                .update_with_context(self.input.value(), ".", &{
+                                    let s = self.state.read().await;
+                                    s.active_session()
+                                        .map(|s| s.cwd.clone())
+                                        .unwrap_or_else(|| ".".into())
+                                });
+                        }
+                    }
+                    Some(Action::HistoryPrev) => {
+                        if self.autocomplete.visible {
+                            self.autocomplete.select_prev();
+                        } else {
+                            self.input.history_up();
+                        }
+                    }
+                    Some(Action::HistoryNext) => {
+                        if self.autocomplete.visible {
+                            self.autocomplete.select_next();
+                        } else {
+                            self.input.history_down();
+                        }
+                    }
+                    None => {
+                        match (key.modifiers, key.code) {
+                            // Ctrl+Shift+]/[ — fallbacks not expressible in keybinding strings
+                            (m, KeyCode::Char(']'))
+                                if m.contains(KeyModifiers::CONTROL)
+                                    && m.contains(KeyModifiers::SHIFT) =>
+                            {
+                                let new_sid = self.tabs.select_next().map(String::from);
+                                let mut state = self.state.write().await;
+                                state.active_session_id = new_sid;
+                                self.messages_scroll = 0;
+                            }
+                            (m, KeyCode::Char('['))
+                                if m.contains(KeyModifiers::CONTROL)
+                                    && m.contains(KeyModifiers::SHIFT) =>
+                            {
+                                let new_sid = self.tabs.previous().map(String::from);
+                                let mut state = self.state.write().await;
+                                state.active_session_id = new_sid;
+                                self.messages_scroll = 0;
+                            }
+                            // New session: Ctrl+T
+                            (KeyModifiers::CONTROL, KeyCode::Char('t')) => {
+                                let project_path = {
+                                    let s = self.state.read().await;
+                                    s.active_session()
+                                        .map(|s| s.project_path.clone())
+                                        .unwrap_or_else(|| {
+                                            std::env::current_dir()
+                                                .map(|p| p.to_string_lossy().to_string())
+                                                .unwrap_or_else(|_| ".".to_string())
+                                        })
+                                };
+                                let configured = detect_configured_providers();
+                                if configured.len() > 1 {
+                                    self.provider_picker = Some(ProviderPickerState {
+                                        project_path,
+                                        providers: configured,
+                                        selected: 0,
+                                    });
+                                } else {
+                                    let model_config = if let Some(cp) = configured.first() {
+                                        one_core::provider::ModelConfig {
+                                            provider: cp.provider,
+                                            model: cp.model.clone(),
+                                            max_tokens: 8000,
+                                            temperature: None,
+                                            budget_tokens: None,
+                                        }
+                                    } else {
+                                        let s = self.state.read().await;
+                                        s.active_session()
+                                            .map(|s| s.model_config.clone())
+                                            .unwrap_or_default()
+                                    };
+                                    let session =
+                                        one_core::session::Session::new(project_path, model_config);
+                                    let sid = session.id.clone();
+                                    let name = session.project_name.clone();
+                                    {
+                                        let mut s = self.state.write().await;
+                                        s.sessions.insert(sid.clone(), session);
+                                        s.active_session_id = Some(sid.clone());
+                                    }
+                                    self.tabs.add_session(name.clone(), sid.clone());
+                                    while self.tabs.active_session_id() != Some(&sid) {
+                                        self.tabs.select_next();
+                                    }
+                                    let _ = self.event_tx.send(Event::SessionCreated {
+                                        session_id: sid,
+                                        project: name,
+                                    });
+                                }
+                            }
+                            // Transcript mode: Ctrl+O
+                            (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
+                                self.transcript_mode = true;
+                                self.transcript_scroll = 0;
+                            }
+                            // ONE.md sidebar toggle: Ctrl+B
+                            (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
+                                self.onemed_open = !self.onemed_open;
+                                if self.onemed_open {
+                                    // Resolve path: root ONE.md → .one/ONE.md shim → none
+                                    let path = {
+                                        let s = self.state.read().await;
+                                        s.active_session().and_then(|sess| {
+                                            let root = std::path::PathBuf::from(&sess.project_path)
+                                                .join("ONE.md");
+                                            let dotone =
+                                                std::path::PathBuf::from(&sess.project_path)
+                                                    .join(".one")
+                                                    .join("ONE.md");
+                                            if root.exists() {
+                                                Some(root)
+                                            } else if dotone.exists() {
+                                                Some(dotone)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                    };
+                                    self.onemed_content =
+                                        path.and_then(|p| std::fs::read_to_string(&p).ok());
+                                } else {
+                                    self.onemed_content = None;
+                                }
+                            }
+                            // Readline/emacs keybindings
+                            (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
+                                self.input.delete_word_backward();
+                            }
+                            (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
+                                self.input.delete_line();
+                            }
+                            (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
+                                self.input.kill_to_end();
+                            }
+                            (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
+                                self.input.move_to_start();
+                            }
+                            (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
+                                self.input.move_to_end();
+                            }
+                            // Alt+Backspace: delete word backward
+                            (KeyModifiers::ALT, KeyCode::Backspace) => {
+                                self.input.delete_word_backward();
+                            }
+                            // Ctrl+Backspace: delete word backward (same as Alt+Backspace)
+                            (KeyModifiers::CONTROL, KeyCode::Backspace) => {
+                                self.input.delete_word_backward();
+                            }
+                            (_, KeyCode::Char(c)) => {
+                                if !self.bash_mode
+                                    && self.input.value().is_empty()
+                                    && (c == '!'
+                                        || c == '1' && key.modifiers.contains(KeyModifiers::SHIFT))
+                                {
+                                    // '!' on empty input → enter bash mode (consume the character)
+                                    self.bash_mode = true;
+                                    self.help_open = false;
+                                } else if !self.bash_mode
+                                    && self.input.value().is_empty()
+                                    && c == '?'
+                                {
+                                    // '?' on empty input → toggle help
+                                    self.help_open = !self.help_open;
+                                } else {
+                                    self.input.insert(c);
+                                    self.help_open = false;
+                                }
+                                {
+                                    let cwd = {
+                                        let s = self.state.read().await;
+                                        s.active_session()
+                                            .map(|s| s.cwd.clone())
+                                            .unwrap_or_else(|| ".".into())
+                                    };
+                                    self.autocomplete.update_with_context(
+                                        self.input.value(),
+                                        ".",
+                                        &cwd,
+                                    );
+                                }
+                            }
+                            (_, KeyCode::Backspace) => {
+                                if self.bash_mode && self.input.value().is_empty() {
+                                    // Backspace on empty bash input → exit bash mode
+                                    self.bash_mode = false;
+                                } else {
+                                    self.input.backspace();
+                                }
+                                if self.help_open && self.input.value().is_empty() {
+                                    self.help_open = false;
+                                }
+                                {
+                                    let cwd = {
+                                        let s = self.state.read().await;
+                                        s.active_session()
+                                            .map(|s| s.cwd.clone())
+                                            .unwrap_or_else(|| ".".into())
+                                    };
+                                    self.autocomplete.update_with_context(
+                                        self.input.value(),
+                                        ".",
+                                        &cwd,
+                                    );
+                                }
+                            }
+                            (_, KeyCode::Left) => self.input.move_left(),
+                            (_, KeyCode::Right) => self.input.move_right(),
+                            _ => {}
+                        } // inner match (key.modifiers, key.code)
+                    } // None arm
+                } // action dispatch
+            }
+        }
+    }
+
+    /// Handle the Cancel action (Ctrl+C by default).
+    /// Returns `true` if the caller should exit the event loop entirely.
+    async fn handle_cancel(&mut self) -> bool {
+        if self.bash_mode || !self.input.value().is_empty() {
+            self.bash_mode = false;
+            self.input.delete_line();
+        } else {
+            let was_streaming = {
+                let mut state = self.state.write().await;
+                if let Some(session) = state.active_session_mut() {
+                    if session.conversation.last_is_streaming() {
+                        session.conversation.finish_current(None);
+                        session.active_tool = None;
+                        self.stream_started = None;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                }
+            };
+            if !was_streaming {
+                let now = std::time::Instant::now();
+                if let Some(last) = self.last_ctrl_c
+                    && now.duration_since(last).as_millis() < 2000
+                {
+                    let _ = self.event_tx.send(Event::Quit);
+                    return true;
+                }
+                self.last_ctrl_c = Some(now);
+                self.input.set_placeholder("Press Ctrl+C again to exit");
+            }
+        }
+        false
+    }
+
+    /// Handle the Submit action (Enter by default).
+    /// Returns `true` if the caller should `continue` the event loop (autocomplete
+    /// consumed the key without submitting).
+    async fn handle_submit(&mut self) -> bool {
+        if self.autocomplete.visible {
+            let current = self.input.value().to_string();
+            if let Some(val) = self.autocomplete.accept_with_input(&current) {
+                if val == current {
+                    // Exact match — nothing to complete, submit directly
+                    self.autocomplete.visible = false;
+                    self.autocomplete.suggestions.clear();
+                } else {
+                    self.input.set_value(val);
+                    self.autocomplete
+                        .update_with_context(self.input.value(), ".", &{
                             let s = self.state.read().await;
                             s.active_session()
-                                .map(|s| s.project_path.clone())
-                                .unwrap_or_else(|| {
-                                    std::env::current_dir()
-                                        .map(|p| p.to_string_lossy().to_string())
-                                        .unwrap_or_else(|_| ".".to_string())
-                                })
+                                .map(|s| s.cwd.clone())
+                                .unwrap_or_else(|| ".".into())
+                        });
+                    return true; // accepted a completion — caller should continue
+                }
+            }
+        }
+        if let Some(raw_msg) = self.input.submit() {
+            let (msg, is_bash_cmd) = if self.bash_mode {
+                self.bash_mode = false;
+                (format!("!{raw_msg}"), true)
+            } else {
+                (raw_msg, false)
+            };
+            if is_bash_cmd
+                || msg.starts_with("! ")
+                || msg.starts_with("!") && msg.len() > 1 && !msg.starts_with("!!")
+            {
+                let cmd = msg
+                    .strip_prefix("! ")
+                    .or_else(|| msg.strip_prefix('!'))
+                    .unwrap_or("");
+                if !cmd.trim().is_empty() {
+                    let working_dir = {
+                        let s = self.state.read().await;
+                        s.active_session()
+                            .map(|s| s.cwd.clone())
+                            .unwrap_or_else(|| ".".to_string())
+                    };
+                    let trimmed_cmd = cmd.trim();
+                    if trimmed_cmd == "cd"
+                        || trimmed_cmd.starts_with("cd ")
+                        || trimmed_cmd.starts_with("cd\t")
+                    {
+                        let target = trimmed_cmd.strip_prefix("cd").unwrap_or("").trim();
+                        let new_dir = if target.is_empty() {
+                            dirs_next::home_dir()
+                                .map(|h| h.to_string_lossy().to_string())
+                                .unwrap_or(working_dir.clone())
+                        } else {
+                            let expanded = if target.starts_with('~') {
+                                dirs_next::home_dir()
+                                    .map(|h| {
+                                        let rest =
+                                            target.strip_prefix("~/").unwrap_or(&target[1..]);
+                                        h.join(rest).to_string_lossy().to_string()
+                                    })
+                                    .unwrap_or(target.to_string())
+                            } else if std::path::Path::new(target).is_absolute() {
+                                target.to_string()
+                            } else {
+                                std::path::Path::new(&working_dir)
+                                    .join(target)
+                                    .to_string_lossy()
+                                    .to_string()
+                            };
+                            std::fs::canonicalize(&expanded)
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or(expanded)
                         };
+                        let mut state = self.state.write().await;
+                        if let Some(session) = state.active_session_mut() {
+                            if std::path::Path::new(&new_dir).is_dir() {
+                                session.cwd = new_dir.clone();
+                                session
+                                    .conversation
+                                    .push_user_message(format!("$ {trimmed_cmd}"));
+                                session.conversation.start_assistant_response();
+                                session.conversation.append_to_current(&format!(
+                                    "Changed directory to `{new_dir}`"
+                                ));
+                                session.conversation.finish_current(None);
+                            } else {
+                                session
+                                    .conversation
+                                    .push_user_message(format!("$ {trimmed_cmd}"));
+                                session.conversation.start_assistant_response();
+                                session
+                                    .conversation
+                                    .append_to_current(&format!("cd: no such directory: {target}"));
+                                session.conversation.finish_current(None);
+                            }
+                        }
+                    } else {
+                        let output = tokio::process::Command::new("sh")
+                            .args(["-c", trimmed_cmd])
+                            .current_dir(&working_dir)
+                            .output()
+                            .await;
+                        let text = match output {
+                            Ok(o) => {
+                                let stdout = String::from_utf8_lossy(&o.stdout);
+                                let stderr = String::from_utf8_lossy(&o.stderr);
+                                let mut result = String::new();
+                                if !stdout.is_empty() {
+                                    result.push_str(&stdout);
+                                }
+                                if !stderr.is_empty() {
+                                    if !result.is_empty() {
+                                        result.push('\n');
+                                    }
+                                    result.push_str(&stderr);
+                                }
+                                if result.is_empty() {
+                                    format!(
+                                        "(command exited with code {})",
+                                        o.status.code().unwrap_or(-1)
+                                    )
+                                } else {
+                                    format!("```\n{}\n```", result.trim())
+                                }
+                            }
+                            Err(e) => format!("Error running command: {e}"),
+                        };
+                        let mut state = self.state.write().await;
+                        if let Some(session) = state.active_session_mut() {
+                            session
+                                .conversation
+                                .push_user_message(format!("$ {trimmed_cmd}"));
+                            session.conversation.start_assistant_response();
+                            session.conversation.append_to_current(&text);
+                            session.conversation.finish_current(None);
+                        }
+                    }
+                }
+            } else if msg.starts_with('/') {
+                let result =
+                    crate::commands::handle_command(&msg, &self.state, &mut self.pet).await;
+                match result {
+                    crate::commands::CommandResult::Message(text) => {
+                        let mut state = self.state.write().await;
+                        if let Some(session) = state.active_session_mut() {
+                            session.conversation.push_user_message(msg);
+                            session.conversation.start_assistant_response();
+                            session.conversation.append_to_current(&text);
+                            session.conversation.finish_current(None);
+                        }
+                    }
+                    crate::commands::CommandResult::ClearConversation => {
+                        let mut state = self.state.write().await;
+                        if let Some(session) = state.active_session_mut() {
+                            session.conversation.turns.clear();
+                        }
+                    }
+                    crate::commands::CommandResult::NewSession { project_path } => {
                         let configured = detect_configured_providers();
                         if configured.len() > 1 {
                             self.provider_picker = Some(ProviderPickerState {
@@ -887,607 +1279,156 @@ impl App {
                             });
                         }
                     }
-                    // Transcript mode: Ctrl+O
-                    (KeyModifiers::CONTROL, KeyCode::Char('o')) => {
-                        self.transcript_mode = true;
-                        self.transcript_scroll = 0;
+                    crate::commands::CommandResult::CloseSession => {
+                        let mut s = self.state.write().await;
+                        if let Some(sid) = s.active_session_id.clone() {
+                            s.sessions.remove(&sid);
+                            s.active_session_id = s.sessions.keys().next().cloned();
+                        }
+                        self.tabs = crate::tabs::TabManager::new();
+                        let s = self.state.read().await;
+                        for (id, session) in &s.sessions {
+                            self.tabs
+                                .add_session(session.project_name.clone(), id.clone());
+                        }
                     }
-                    // ONE.md sidebar toggle: Ctrl+B
-                    (KeyModifiers::CONTROL, KeyCode::Char('b')) => {
-                        self.onemed_open = !self.onemed_open;
-                        if self.onemed_open {
-                            // Resolve path: root ONE.md → .one/ONE.md shim → none
-                            let path = {
-                                let s = self.state.read().await;
-                                s.active_session().and_then(|sess| {
-                                    let root =
-                                        std::path::PathBuf::from(&sess.project_path).join("ONE.md");
-                                    let dotone = std::path::PathBuf::from(&sess.project_path)
-                                        .join(".one")
-                                        .join("ONE.md");
-                                    if root.exists() {
-                                        Some(root)
-                                    } else if dotone.exists() {
-                                        Some(dotone)
-                                    } else {
-                                        None
+                    crate::commands::CommandResult::SwitchSession { name: sid } => {
+                        let mut s = self.state.write().await;
+                        s.active_session_id = Some(sid.clone());
+                        drop(s);
+                        while self.tabs.active_session_id() != Some(sid.as_str()) {
+                            self.tabs.select_next();
+                        }
+                    }
+                    crate::commands::CommandResult::OAuthLogin { provider } => {
+                        {
+                            let mut s = self.state.write().await;
+                            if let Some(session) = s.active_session_mut() {
+                                session.conversation.push_user_message(msg);
+                                session.conversation.start_assistant_response();
+                                session.conversation.append_to_current(&format!(
+                                    "Opening browser for {provider} login..."
+                                ));
+                                session.conversation.finish_current(None);
+                            }
+                        }
+                        let state_clone = self.state.clone();
+                        let provider_clone = provider.clone();
+                        tokio::spawn(async move {
+                            match one_core::oauth::browser_login(&provider_clone).await {
+                                Ok(result) => {
+                                    let mut s = state_clone.write().await;
+                                    if let Some(session) = s.active_session_mut() {
+                                        let all_msgs = result.messages.join("\n");
+                                        session.conversation.start_assistant_response();
+                                        session.conversation.append_to_current(&all_msgs);
+                                        session.conversation.finish_current(None);
                                     }
-                                })
-                            };
-                            self.onemed_content =
-                                path.and_then(|p| std::fs::read_to_string(&p).ok());
-                        } else {
-                            self.onemed_content = None;
-                        }
+                                }
+                                Err(e) => {
+                                    let mut s = state_clone.write().await;
+                                    if let Some(session) = s.active_session_mut() {
+                                        session.conversation.start_assistant_response();
+                                        session.conversation.append_to_current(
+                                            &format!("Login failed: {e}\n\nYou can also use: /login {provider_clone} <api_key>")
+                                        );
+                                        session.conversation.finish_current(None);
+                                    }
+                                }
+                            }
+                        });
                     }
-                    // Close session: Ctrl+W (with confirmation)
-                    (KeyModifiers::CONTROL, KeyCode::Char('w')) => {
-                        let has_session = {
-                            let s = self.state.read().await;
-                            s.active_session_id.is_some()
-                        };
-                        if has_session {
-                            self.close_confirm = true;
-                            self.input.set_placeholder("Close this session? (y/n)");
-                        }
-                    }
-                    // Readline/emacs keybindings
-                    (KeyModifiers::CONTROL, KeyCode::Char('l')) => {
-                        // Clear screen — reset scroll and clear conversation display
-                        self.messages_scroll = 0;
+                    crate::commands::CommandResult::SendToAi(prompt) => {
+                        self.pet.on_user_message();
                         let mut state = self.state.write().await;
                         if let Some(session) = state.active_session_mut() {
-                            session.conversation.turns.clear();
-                        }
-                    }
-                    (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
-                        self.input.delete_line();
-                    }
-                    (KeyModifiers::CONTROL, KeyCode::Char('k')) => {
-                        self.input.kill_to_end();
-                    }
-                    (KeyModifiers::CONTROL, KeyCode::Char('a')) => {
-                        self.input.move_to_start();
-                    }
-                    (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
-                        self.input.move_to_end();
-                    }
-                    // Alt+Backspace: delete word backward
-                    (KeyModifiers::ALT, KeyCode::Backspace) => {
-                        self.input.delete_word_backward();
-                    }
-                    // Ctrl+Backspace: delete entire line
-                    (KeyModifiers::CONTROL, KeyCode::Backspace) => {
-                        self.input.delete_line();
-                    }
-                    (_, KeyCode::Esc) => {
-                        if self.bash_mode {
-                            self.bash_mode = false;
-                            self.input.delete_line();
-                        } else if self.help_open {
-                            self.help_open = false;
-                        } else if self.onemed_open {
-                            self.onemed_open = false;
-                            self.onemed_content = None;
-                        } else if self.autocomplete.visible {
-                            self.autocomplete.visible = false;
-                        } else {
-                            // Check if AI is currently streaming — Escape aborts
-                            let mut state = self.state.write().await;
-                            if let Some(session) = state.active_session_mut()
-                                && session.conversation.last_is_streaming()
-                            {
-                                session.conversation.finish_current(None);
-                                session.active_tool = None;
-                            }
+                            session.conversation.push_user_message(prompt.clone());
+                            let sid = session.id.clone();
                             drop(state);
-                            // Also handle vim escape
-                            self.input.handle_vim_escape();
+                            let _ = self.event_tx.send(Event::UserMessage {
+                                session_id: sid,
+                                content: prompt,
+                            });
                         }
                     }
-                    (_, KeyCode::Tab) => {
-                        if self.bash_mode {
-                            // Bash mode: shell-aware tab completion
-                            let working_dir = {
-                                let s = self.state.read().await;
-                                s.active_session()
-                                    .map(|s| s.cwd.clone())
-                                    .unwrap_or_else(|| ".".to_string())
-                            };
-                            let raw = self.input.value().to_string();
-                            if let Some(completed) = shell_tab_complete(&raw, &working_dir) {
-                                self.input.set_value(completed);
+                    crate::commands::CommandResult::EmitEvent(evt) => {
+                        let _ = self.event_tx.send(evt);
+                    }
+                    crate::commands::CommandResult::Silent => {}
+                    crate::commands::CommandResult::Quit => {
+                        let _ = self.event_tx.send(Event::Quit);
+                    }
+                    crate::commands::CommandResult::NotACommand => {}
+                    crate::commands::CommandResult::OpenImportPicker => {
+                        let sessions = tokio::task::spawn_blocking(
+                            one_core::storage::list_all_importable_sessions,
+                        )
+                        .await
+                        .unwrap_or_else(|_| Ok(Vec::new()))
+                        .unwrap_or_default();
+                        if sessions.is_empty() {
+                            let mut state = self.state.write().await;
+                            if let Some(session) = state.active_session_mut() {
+                                session.conversation.push_user_message(msg);
+                                session.conversation.start_assistant_response();
+                                session.conversation.append_to_current(
+                                    "No sessions found.\n\nSearched:\n  ~/.claude/projects/  (Claude Code)\n  ~/.codex/            (Codex)\n  ~/.gemini/tmp/       (Gemini CLI)"
+                                );
+                                session.conversation.finish_current(None);
                             }
-                        } else if let Some(val) =
-                            self.autocomplete.accept_with_input(self.input.value())
-                        {
-                            self.input.set_value(val);
-                            self.autocomplete
-                                .update_with_context(self.input.value(), ".", &{
-                                    let s = self.state.read().await;
-                                    s.active_session()
-                                        .map(|s| s.cwd.clone())
-                                        .unwrap_or_else(|| ".".into())
-                                });
-                        }
-                    }
-                    (KeyModifiers::SHIFT, KeyCode::Enter) => {
-                        self.input.insert('\n');
-                    }
-                    (_, KeyCode::Enter) => {
-                        if self.autocomplete.visible {
-                            let current = self.input.value().to_string();
-                            if let Some(val) = self.autocomplete.accept_with_input(&current) {
-                                if val == current {
-                                    // Exact match — nothing to complete, submit directly
-                                    self.autocomplete.visible = false;
-                                    self.autocomplete.suggestions.clear();
-                                } else {
-                                    self.input.set_value(val);
-                                    self.autocomplete.update_with_context(
-                                        self.input.value(),
-                                        ".",
-                                        &{
-                                            let s = self.state.read().await;
-                                            s.active_session()
-                                                .map(|s| s.cwd.clone())
-                                                .unwrap_or_else(|| ".".into())
-                                        },
-                                    );
-                                    // Accepted a completion — don't submit yet
-                                    continue;
-                                }
-                            }
-                        }
-                        if let Some(raw_msg) = self.input.submit() {
-                            // If bash mode, prefix the command back with !
-                            let (msg, is_bash_cmd) = if self.bash_mode {
-                                self.bash_mode = false;
-                                (format!("!{raw_msg}"), true)
-                            } else {
-                                (raw_msg, false)
-                            };
-                            // Check for ! prefix (inline shell command)
-                            if is_bash_cmd
-                                || msg.starts_with("! ")
-                                || msg.starts_with("!") && msg.len() > 1 && !msg.starts_with("!!")
-                            {
-                                let cmd = msg
-                                    .strip_prefix("! ")
-                                    .or_else(|| msg.strip_prefix('!'))
-                                    .unwrap_or("");
-                                if !cmd.trim().is_empty() {
-                                    let working_dir = {
-                                        let s = self.state.read().await;
-                                        s.active_session()
-                                            .map(|s| s.cwd.clone())
-                                            .unwrap_or_else(|| ".".to_string())
-                                    };
-
-                                    // Handle cd: resolve new directory, update cwd
-                                    let trimmed_cmd = cmd.trim();
-                                    if trimmed_cmd == "cd"
-                                        || trimmed_cmd.starts_with("cd ")
-                                        || trimmed_cmd.starts_with("cd\t")
-                                    {
-                                        let target =
-                                            trimmed_cmd.strip_prefix("cd").unwrap_or("").trim();
-                                        let new_dir = if target.is_empty() {
-                                            dirs_next::home_dir()
-                                                .map(|h| h.to_string_lossy().to_string())
-                                                .unwrap_or(working_dir.clone())
-                                        } else {
-                                            let expanded = if target.starts_with('~') {
-                                                dirs_next::home_dir()
-                                                    .map(|h| {
-                                                        let rest = target
-                                                            .strip_prefix("~/")
-                                                            .unwrap_or(&target[1..]);
-                                                        h.join(rest).to_string_lossy().to_string()
-                                                    })
-                                                    .unwrap_or(target.to_string())
-                                            } else if std::path::Path::new(target).is_absolute() {
-                                                target.to_string()
-                                            } else {
-                                                std::path::Path::new(&working_dir)
-                                                    .join(target)
-                                                    .to_string_lossy()
-                                                    .to_string()
-                                            };
-                                            // Canonicalize to resolve .. and .
-                                            std::fs::canonicalize(&expanded)
-                                                .map(|p| p.to_string_lossy().to_string())
-                                                .unwrap_or(expanded)
-                                        };
-
-                                        let mut state = self.state.write().await;
-                                        if let Some(session) = state.active_session_mut() {
-                                            if std::path::Path::new(&new_dir).is_dir() {
-                                                session.cwd = new_dir.clone();
-                                                session
-                                                    .conversation
-                                                    .push_user_message(format!("$ {trimmed_cmd}"));
-                                                session.conversation.start_assistant_response();
-                                                session.conversation.append_to_current(&format!(
-                                                    "Changed directory to `{new_dir}`"
-                                                ));
-                                                session.conversation.finish_current(None);
-                                            } else {
-                                                session
-                                                    .conversation
-                                                    .push_user_message(format!("$ {trimmed_cmd}"));
-                                                session.conversation.start_assistant_response();
-                                                session.conversation.append_to_current(&format!(
-                                                    "cd: no such directory: {target}"
-                                                ));
-                                                session.conversation.finish_current(None);
-                                            }
-                                        }
-                                    } else {
-                                        let output = tokio::process::Command::new("sh")
-                                            .args(["-c", trimmed_cmd])
-                                            .current_dir(&working_dir)
-                                            .output()
-                                            .await;
-                                        let text = match output {
-                                            Ok(o) => {
-                                                let stdout = String::from_utf8_lossy(&o.stdout);
-                                                let stderr = String::from_utf8_lossy(&o.stderr);
-                                                let mut result = String::new();
-                                                if !stdout.is_empty() {
-                                                    result.push_str(&stdout);
-                                                }
-                                                if !stderr.is_empty() {
-                                                    if !result.is_empty() {
-                                                        result.push('\n');
-                                                    }
-                                                    result.push_str(&stderr);
-                                                }
-                                                if result.is_empty() {
-                                                    format!(
-                                                        "(command exited with code {})",
-                                                        o.status.code().unwrap_or(-1)
-                                                    )
-                                                } else {
-                                                    format!("```\n{}\n```", result.trim())
-                                                }
-                                            }
-                                            Err(e) => format!("Error running command: {e}"),
-                                        };
-                                        let mut state = self.state.write().await;
-                                        if let Some(session) = state.active_session_mut() {
-                                            session
-                                                .conversation
-                                                .push_user_message(format!("$ {trimmed_cmd}"));
-                                            session.conversation.start_assistant_response();
-                                            session.conversation.append_to_current(&text);
-                                            session.conversation.finish_current(None);
-                                        }
-                                    }
-                                }
-                            }
-                            // Check for slash commands
-                            else if msg.starts_with('/') {
-                                let result = crate::commands::handle_command(
-                                    &msg,
-                                    &self.state,
-                                    &mut self.pet,
-                                )
-                                .await;
-
-                                match result {
-                                    crate::commands::CommandResult::Message(text) => {
-                                        let mut state = self.state.write().await;
-                                        if let Some(session) = state.active_session_mut() {
-                                            session.conversation.push_user_message(msg);
-                                            session.conversation.start_assistant_response();
-                                            session.conversation.append_to_current(&text);
-                                            session.conversation.finish_current(None);
-                                        }
-                                    }
-                                    crate::commands::CommandResult::ClearConversation => {
-                                        let mut state = self.state.write().await;
-                                        if let Some(session) = state.active_session_mut() {
-                                            session.conversation.turns.clear();
-                                        }
-                                    }
-                                    crate::commands::CommandResult::NewSession { project_path } => {
-                                        let configured = detect_configured_providers();
-                                        if configured.len() > 1 {
-                                            // Multiple providers — show picker
-                                            self.provider_picker = Some(ProviderPickerState {
-                                                project_path,
-                                                providers: configured,
-                                                selected: 0,
-                                            });
-                                        } else {
-                                            // Single provider or none — use it directly
-                                            let model_config = if let Some(cp) = configured.first()
-                                            {
-                                                one_core::provider::ModelConfig {
-                                                    provider: cp.provider,
-                                                    model: cp.model.clone(),
-                                                    max_tokens: 8000,
-                                                    temperature: None,
-                                                    budget_tokens: None,
-                                                }
-                                            } else {
-                                                let s = self.state.read().await;
-                                                s.active_session()
-                                                    .map(|s| s.model_config.clone())
-                                                    .unwrap_or_default()
-                                            };
-                                            let session = one_core::session::Session::new(
-                                                project_path,
-                                                model_config,
-                                            );
-                                            let sid = session.id.clone();
-                                            let name = session.project_name.clone();
-                                            {
-                                                let mut s = self.state.write().await;
-                                                s.sessions.insert(sid.clone(), session);
-                                                s.active_session_id = Some(sid.clone());
-                                            }
-                                            self.tabs.add_session(name.clone(), sid.clone());
-                                            while self.tabs.active_session_id() != Some(&sid) {
-                                                self.tabs.select_next();
-                                            }
-                                            let _ = self.event_tx.send(Event::SessionCreated {
-                                                session_id: sid,
-                                                project: name,
-                                            });
-                                        }
-                                    }
-                                    crate::commands::CommandResult::CloseSession => {
-                                        let mut s = self.state.write().await;
-                                        if let Some(sid) = s.active_session_id.clone() {
-                                            s.sessions.remove(&sid);
-                                            // Switch to another session or inbox
-                                            s.active_session_id = s.sessions.keys().next().cloned();
-                                        }
-                                        // Reset tabs — rebuild from state
-                                        self.tabs = crate::tabs::TabManager::new();
-                                        let s = self.state.read().await;
-                                        for (id, session) in &s.sessions {
-                                            self.tabs.add_session(
-                                                session.project_name.clone(),
-                                                id.clone(),
-                                            );
-                                        }
-                                    }
-                                    crate::commands::CommandResult::SwitchSession { name: sid } => {
-                                        let mut s = self.state.write().await;
-                                        s.active_session_id = Some(sid.clone());
-                                        drop(s);
-                                        // Move tab selection to match
-                                        while self.tabs.active_session_id() != Some(sid.as_str()) {
-                                            self.tabs.select_next();
-                                        }
-                                    }
-                                    crate::commands::CommandResult::OAuthLogin { provider } => {
-                                        // Show "opening browser" message
-                                        {
-                                            let mut s = self.state.write().await;
-                                            if let Some(session) = s.active_session_mut() {
-                                                session.conversation.push_user_message(msg);
-                                                session.conversation.start_assistant_response();
-                                                session.conversation.append_to_current(&format!(
-                                                    "Opening browser for {provider} login..."
-                                                ));
-                                                session.conversation.finish_current(None);
-                                            }
-                                        }
-
-                                        // Run OAuth flow in background
-                                        let state_clone = self.state.clone();
-                                        let provider_clone = provider.clone();
-                                        tokio::spawn(async move {
-                                            match one_core::oauth::browser_login(&provider_clone)
-                                                .await
-                                            {
-                                                Ok(result) => {
-                                                    let mut s = state_clone.write().await;
-                                                    if let Some(session) = s.active_session_mut() {
-                                                        let all_msgs = result.messages.join("\n");
-                                                        session
-                                                            .conversation
-                                                            .start_assistant_response();
-                                                        session
-                                                            .conversation
-                                                            .append_to_current(&all_msgs);
-                                                        session.conversation.finish_current(None);
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    let mut s = state_clone.write().await;
-                                                    if let Some(session) = s.active_session_mut() {
-                                                        session
-                                                            .conversation
-                                                            .start_assistant_response();
-                                                        session.conversation.append_to_current(
-                                                                &format!("Login failed: {e}\n\nYou can also use: /login {provider_clone} <api_key>")
-                                                            );
-                                                        session.conversation.finish_current(None);
-                                                    }
-                                                }
-                                            }
-                                        });
-                                    }
-                                    crate::commands::CommandResult::SendToAi(prompt) => {
-                                        // Send the prompt as a user message to the AI
-                                        self.pet.on_user_message();
-                                        let mut state = self.state.write().await;
-                                        if let Some(session) = state.active_session_mut() {
-                                            session.conversation.push_user_message(prompt.clone());
-                                            let sid = session.id.clone();
-                                            drop(state);
-                                            let _ = self.event_tx.send(Event::UserMessage {
-                                                session_id: sid,
-                                                content: prompt,
-                                            });
-                                        }
-                                    }
-                                    crate::commands::CommandResult::EmitEvent(evt) => {
-                                        let _ = self.event_tx.send(evt);
-                                    }
-                                    crate::commands::CommandResult::Silent => {}
-                                    crate::commands::CommandResult::Quit => {
-                                        let _ = self.event_tx.send(Event::Quit);
-                                        return Ok(());
-                                    }
-                                    crate::commands::CommandResult::NotACommand => {}
-                                    crate::commands::CommandResult::OpenImportPicker => {
-                                        let sessions = tokio::task::spawn_blocking(
-                                            one_core::storage::list_all_importable_sessions,
-                                        )
-                                        .await
-                                        .unwrap_or_else(|_| Ok(Vec::new()))
-                                        .unwrap_or_default();
-
-                                        if sessions.is_empty() {
-                                            let mut state = self.state.write().await;
-                                            if let Some(session) = state.active_session_mut() {
-                                                session.conversation.push_user_message(msg);
-                                                session.conversation.start_assistant_response();
-                                                session.conversation.append_to_current(
-                                                    "No sessions found.\n\nSearched:\n  ~/.claude/projects/  (Claude Code)\n  ~/.codex/            (Codex)\n  ~/.gemini/tmp/       (Gemini CLI)"
-                                                );
-                                                session.conversation.finish_current(None);
-                                            }
-                                        } else {
-                                            self.import_picker = Some(ImportPickerState {
-                                                sessions,
-                                                selected: 0,
-                                                status: None,
-                                            });
-                                        }
-                                    }
-                                }
-                            } else {
-                                self.pet.on_user_message();
-                                // Expand @file references in user messages
-                                let working_dir = {
-                                    let s = self.state.read().await;
-                                    s.active_session()
-                                        .map(|s| s.project_path.clone())
-                                        .unwrap_or_else(|| ".".to_string())
-                                };
-                                let msg = one_core::skills::expand_at_mentions(&msg, &working_dir);
-                                let mut state = self.state.write().await;
-                                if let Some(session) = state.active_session_mut() {
-                                    session.conversation.push_user_message(msg.clone());
-                                    let sid = session.id.clone();
-                                    drop(state);
-                                    let _ = self.event_tx.send(Event::UserMessage {
-                                        session_id: sid,
-                                        content: msg,
-                                    });
-                                } else {
-                                    // No active session — create one on the fly
-                                    let project_path = std::env::current_dir()
-                                        .map(|p| p.to_string_lossy().to_string())
-                                        .unwrap_or_else(|_| ".".to_string());
-                                    let session = one_core::session::Session::new(
-                                        project_path,
-                                        one_core::provider::ModelConfig::default(),
-                                    );
-                                    let sid = session.id.clone();
-                                    let name = session.project_name.clone();
-                                    state.sessions.insert(sid.clone(), session);
-                                    state.active_session_id = Some(sid.clone());
-
-                                    // Now add the message
-                                    if let Some(session) = state.active_session_mut() {
-                                        session.conversation.push_user_message(msg.clone());
-                                    }
-
-                                    self.tabs.add_session(name, sid.clone());
-                                    drop(state);
-
-                                    let _ = self.event_tx.send(Event::UserMessage {
-                                        session_id: sid,
-                                        content: msg,
-                                    });
-                                }
-                            }
-                            self.messages_scroll = 0;
-                        }
-                    }
-                    (_, KeyCode::Char(c)) => {
-                        if !self.bash_mode
-                            && self.input.value().is_empty()
-                            && (c == '!' || c == '1' && key.modifiers.contains(KeyModifiers::SHIFT))
-                        {
-                            // '!' on empty input → enter bash mode (consume the character)
-                            self.bash_mode = true;
-                            self.help_open = false;
-                        } else if !self.bash_mode && self.input.value().is_empty() && c == '?' {
-                            // '?' on empty input → toggle help
-                            self.help_open = !self.help_open;
                         } else {
-                            self.input.insert(c);
-                            self.help_open = false;
-                        }
-                        {
-                            let cwd = {
-                                let s = self.state.read().await;
-                                s.active_session()
-                                    .map(|s| s.cwd.clone())
-                                    .unwrap_or_else(|| ".".into())
-                            };
-                            self.autocomplete
-                                .update_with_context(self.input.value(), ".", &cwd);
+                            self.import_picker = Some(ImportPickerState {
+                                sessions,
+                                selected: 0,
+                                status: None,
+                            });
                         }
                     }
-                    (_, KeyCode::Backspace) => {
-                        if self.bash_mode && self.input.value().is_empty() {
-                            // Backspace on empty bash input → exit bash mode
-                            self.bash_mode = false;
-                        } else {
-                            self.input.backspace();
-                        }
-                        if self.help_open && self.input.value().is_empty() {
-                            self.help_open = false;
-                        }
-                        {
-                            let cwd = {
-                                let s = self.state.read().await;
-                                s.active_session()
-                                    .map(|s| s.cwd.clone())
-                                    .unwrap_or_else(|| ".".into())
-                            };
-                            self.autocomplete
-                                .update_with_context(self.input.value(), ".", &cwd);
-                        }
+                }
+            } else {
+                self.pet.on_user_message();
+                let working_dir = {
+                    let s = self.state.read().await;
+                    s.active_session()
+                        .map(|s| s.project_path.clone())
+                        .unwrap_or_else(|| ".".to_string())
+                };
+                let msg = one_core::skills::expand_at_mentions(&msg, &working_dir);
+                let mut state = self.state.write().await;
+                if let Some(session) = state.active_session_mut() {
+                    session.conversation.push_user_message(msg.clone());
+                    let sid = session.id.clone();
+                    drop(state);
+                    let _ = self.event_tx.send(Event::UserMessage {
+                        session_id: sid,
+                        content: msg,
+                    });
+                } else {
+                    let project_path = std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| ".".to_string());
+                    let session = one_core::session::Session::new(
+                        project_path,
+                        one_core::provider::ModelConfig::default(),
+                    );
+                    let sid = session.id.clone();
+                    let name = session.project_name.clone();
+                    state.sessions.insert(sid.clone(), session);
+                    state.active_session_id = Some(sid.clone());
+                    if let Some(session) = state.active_session_mut() {
+                        session.conversation.push_user_message(msg.clone());
                     }
-                    (_, KeyCode::Left) => self.input.move_left(),
-                    (_, KeyCode::Right) => self.input.move_right(),
-                    // Up/Down: input history (always)
-                    (_, KeyCode::Up) => {
-                        if self.autocomplete.visible {
-                            self.autocomplete.select_prev();
-                        } else {
-                            self.input.history_up();
-                        }
-                    }
-                    (_, KeyCode::Down) => {
-                        if self.autocomplete.visible {
-                            self.autocomplete.select_next();
-                        } else {
-                            self.input.history_down();
-                        }
-                    }
-                    // PageUp/PageDown: scroll conversation
-                    (_, KeyCode::PageUp) => {
-                        self.messages_scroll = self.messages_scroll.saturating_add(10);
-                    }
-                    (_, KeyCode::PageDown) => {
-                        self.messages_scroll = self.messages_scroll.saturating_sub(10);
-                    }
-                    _ => {}
+                    self.tabs.add_session(name, sid.clone());
+                    drop(state);
+                    let _ = self.event_tx.send(Event::UserMessage {
+                        session_id: sid,
+                        content: msg,
+                    });
                 }
             }
+            self.messages_scroll = 0;
         }
+        false
     }
 
     fn draw(&self, f: &mut Frame, snapshot: &one_core::state::AppState) {
@@ -1796,7 +1737,7 @@ impl App {
             "Use /compact to summarize the conversation and save context.",
             "The /switch command lets you jump to another project by name.",
             "Ctrl+T opens a new session. Ctrl+W closes the current one.",
-            "Up/Down arrows browse your input history.",
+            "Up/Down browses your input history. PageUp/PageDown scrolls the chat.",
             "Ctrl+C clears input, cancels streams, or double-tap to exit.",
             "Use /effort to control reasoning depth (low/medium/high/max).",
         ];
@@ -2958,7 +2899,7 @@ impl App {
             ]),
             Line::from(vec![
                 Span::styled("  Ctrl+W       ", key_style),
-                Span::styled("Close session", dim),
+                Span::styled("Delete word backward", dim),
             ]),
             Line::from(vec![
                 Span::styled("  Ctrl+Shift+] ", key_style),

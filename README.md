@@ -508,10 +508,9 @@ Evergreen chunks are stored in the session DB with full structured fields (goal,
 
 | Key | Action |
 |---|---|
-| `Ctrl+Shift+]` | Next tab |
-| `Ctrl+Shift+[` | Previous tab |
-| `Ctrl+T` / `Ctrl+N` | New session |
-| `Ctrl+W` | Close session |
+| `Ctrl+Shift+]` / `Ctrl+N` | Next tab |
+| `Ctrl+Shift+[` / `Ctrl+P` | Previous tab |
+| `Ctrl+T` | New session |
 | `Ctrl+O` | Full-screen transcript view |
 | `PageUp` / `PageDown` | Scroll conversation |
 
@@ -525,6 +524,18 @@ Evergreen chunks are stored in the session DB with full structured fields (goal,
 | `Tab` | Accept autocomplete |
 | `Ctrl+C` | Clear input → cancel stream → exit (double) |
 | `Escape` | Abort streaming response |
+
+### Editing
+
+| Key | Action |
+|---|---|
+| `Ctrl+A` | Move to start of line |
+| `Ctrl+E` | Move to end of line |
+| `Ctrl+U` | Delete to start of line |
+| `Ctrl+K` | Delete to end of line |
+| `Ctrl+W` / `Alt+Backspace` | Delete word backward |
+
+> Use `/close` to close the current session.
 
 ### Transcript Mode (`Ctrl+O`)
 

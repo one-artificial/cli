@@ -5,7 +5,7 @@
 //! - ~/.claude/keybindings.json (CC-compatible)
 //!
 //! Actions: submit, newline, cancel, clear, scroll_up, scroll_down,
-//! tab_next, tab_prev, interrupt, history_prev, history_next.
+//! tab_next, tab_prev, interrupt, history_prev, history_next, autocomplete.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -140,8 +140,8 @@ impl KeybindingConfig {
         bindings.insert(Action::Clear, vec![KeyCombo::parse("ctrl+l")]);
         bindings.insert(Action::ScrollUp, vec![KeyCombo::parse("pageup")]);
         bindings.insert(Action::ScrollDown, vec![KeyCombo::parse("pagedown")]);
-        bindings.insert(Action::TabNext, vec![KeyCombo::parse("ctrl+right")]);
-        bindings.insert(Action::TabPrev, vec![KeyCombo::parse("ctrl+left")]);
+        bindings.insert(Action::TabNext, vec![KeyCombo::parse("ctrl+n")]);
+        bindings.insert(Action::TabPrev, vec![KeyCombo::parse("ctrl+p")]);
         bindings.insert(Action::Interrupt, vec![KeyCombo::parse("escape")]);
         bindings.insert(Action::HistoryPrev, vec![KeyCombo::parse("up")]);
         bindings.insert(Action::HistoryNext, vec![KeyCombo::parse("down")]);
@@ -161,6 +161,22 @@ impl KeybindingConfig {
             .get(action)
             .map(|combos| combos.iter().any(|c| c.matches_crossterm(code, modifiers)))
             .unwrap_or(false)
+    }
+
+    /// Return the action bound to this key, if any.
+    /// Used by the TUI dispatcher: check this first; fall through to hard-coded
+    /// bindings only when `None` is returned.
+    pub fn action_for(
+        &self,
+        code: crossterm::event::KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> Option<Action> {
+        for (action, combos) in &self.bindings {
+            if combos.iter().any(|c| c.matches_crossterm(code, modifiers)) {
+                return Some(action.clone());
+            }
+        }
+        None
     }
 
     fn apply_overrides(&mut self, overrides: &HashMap<String, Vec<String>>) {
@@ -255,5 +271,45 @@ mod tests {
         // Now submit requires ctrl+enter, not plain enter
         assert!(config.matches(&Action::Submit, KeyCode::Enter, KeyModifiers::CONTROL));
         assert!(!config.matches(&Action::Submit, KeyCode::Enter, KeyModifiers::NONE));
+    }
+
+    #[test]
+    fn test_action_for_defaults() {
+        let config = KeybindingConfig::defaults();
+        assert_eq!(
+            config.action_for(KeyCode::Enter, KeyModifiers::NONE),
+            Some(Action::Submit)
+        );
+        assert_eq!(
+            config.action_for(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            Some(Action::Cancel)
+        );
+        assert_eq!(
+            config.action_for(KeyCode::Up, KeyModifiers::NONE),
+            Some(Action::HistoryPrev)
+        );
+        assert_eq!(
+            config.action_for(KeyCode::PageUp, KeyModifiers::NONE),
+            Some(Action::ScrollUp)
+        );
+        // Unbound key → None
+        assert_eq!(config.action_for(KeyCode::F(1), KeyModifiers::NONE), None);
+    }
+
+    #[test]
+    fn test_action_for_reflects_overrides() {
+        let mut config = KeybindingConfig::defaults();
+        let mut overrides = HashMap::new();
+        // Remap submit to ctrl+enter
+        overrides.insert("submit".to_string(), vec!["ctrl+enter".to_string()]);
+        config.apply_overrides(&overrides);
+
+        // Enter no longer triggers Submit
+        assert_eq!(config.action_for(KeyCode::Enter, KeyModifiers::NONE), None);
+        // Ctrl+Enter now triggers Submit
+        assert_eq!(
+            config.action_for(KeyCode::Enter, KeyModifiers::CONTROL),
+            Some(Action::Submit)
+        );
     }
 }
