@@ -5,7 +5,9 @@ pub mod providers;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use one_core::provider::{AiProvider, AiResponse, Message, ModelConfig, Provider};
 use providers::{OpenAiCompatConfig, OpenAiCompatProvider};
@@ -57,6 +59,32 @@ fn lane_for(provider_name: &str) -> Arc<Semaphore> {
         .clone()
 }
 
+// ── Retry helpers ────────────────────────────────────────────────────────────
+
+const MAX_RETRIES: u32 = 4;
+
+/// True for HTTP 429 / 502 / 503 and common rate-limit phrases.
+/// These are errors the provider will likely recover from if we back off.
+fn is_retryable(e: &anyhow::Error) -> bool {
+    let msg = e.to_string().to_lowercase();
+    msg.contains("429")
+        || msg.contains("503")
+        || msg.contains("502")
+        || msg.contains("rate limit")
+        || msg.contains("too many requests")
+        || msg.contains("overloaded")
+        || msg.contains("capacity")
+}
+
+/// Exponential backoff with ±20 % jitter: 1 s, 2 s, 4 s, 8 s.
+fn backoff_delay(attempt: u32) -> Duration {
+    let base_ms: u64 = 1000 * (1 << attempt.min(6));
+    // ±20 % jitter using the attempt as a deterministic seed substitute.
+    // True randomness isn't worth the dependency here.
+    let jitter_ms = base_ms / 5 * (attempt as u64 % 3); // 0 %, 20 %, 40 % of base
+    Duration::from_millis(base_ms + jitter_ms)
+}
+
 /// Wraps an `AiProvider` so every call acquires a permit from the provider's
 /// lane before hitting the API.
 ///
@@ -78,11 +106,28 @@ impl AiProvider for GatedProvider {
         let messages = messages.to_vec();
         let config = config.clone();
         Box::pin(async move {
-            let _permit = lane
-                .acquire_owned()
-                .await
-                .map_err(|e| anyhow::anyhow!("API lane closed: {e}"))?;
-            inner.send_message(&messages, &config).await
+            let mut attempt = 0u32;
+            loop {
+                let permit = lane
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("API lane closed: {e}"))?;
+                match inner.send_message(&messages, &config).await {
+                    Ok(r) => return Ok(r),
+                    Err(e) if is_retryable(&e) && attempt < MAX_RETRIES => {
+                        drop(permit); // release lane before sleeping
+                        tracing::warn!(
+                            "retryable API error (attempt {}/{}): {e}",
+                            attempt + 1,
+                            MAX_RETRIES
+                        );
+                        tokio::time::sleep(backoff_delay(attempt)).await;
+                        attempt += 1;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
         })
     }
 
@@ -96,12 +141,46 @@ impl AiProvider for GatedProvider {
         let lane = self.lane.clone();
         let messages = messages.to_vec();
         let config = config.clone();
+        // Arc so the closure can be shared across retry attempts without moving.
+        let on_chunk: Arc<dyn Fn(String) + Send + Sync> = Arc::from(on_chunk);
         Box::pin(async move {
-            let _permit = lane
-                .acquire_owned()
-                .await
-                .map_err(|e| anyhow::anyhow!("API lane closed: {e}"))?;
-            inner.stream_message(&messages, &config, on_chunk).await
+            let mut attempt = 0u32;
+            loop {
+                // Track whether any chunks reached the caller.  Once the TUI has
+                // received partial output we cannot safely retry — the conversation
+                // state already has that content.
+                let chunks_started = Arc::new(AtomicBool::new(false));
+                let flag = chunks_started.clone();
+                let cb = on_chunk.clone();
+                let wrapped: Box<dyn Fn(String) + Send + Sync> = Box::new(move |s: String| {
+                    flag.store(true, Ordering::Relaxed);
+                    cb(s);
+                });
+
+                let permit = lane
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("API lane closed: {e}"))?;
+                match inner.stream_message(&messages, &config, wrapped).await {
+                    Ok(r) => return Ok(r),
+                    Err(e)
+                        if is_retryable(&e)
+                            && attempt < MAX_RETRIES
+                            && !chunks_started.load(Ordering::Relaxed) =>
+                    {
+                        drop(permit); // release lane before sleeping
+                        tracing::warn!(
+                            "retryable API error (attempt {}/{}): {e}",
+                            attempt + 1,
+                            MAX_RETRIES
+                        );
+                        tokio::time::sleep(backoff_delay(attempt)).await;
+                        attempt += 1;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
         })
     }
 
