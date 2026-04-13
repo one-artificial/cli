@@ -96,11 +96,20 @@ impl Tool for BashTool {
                 return Ok(ToolResult::success(msg));
             }
 
+            // Wrap with a sentinel so we can detect directory changes.
+            // The exit code of the original command is preserved.
+            // $PWD is updated by bash when `cd` runs, so it reflects the
+            // post-command directory even if the command never printed anything.
+            const CWD_MARKER: &str = "__ONE_EXIT_CWD__:";
+            let wrapped = format!(
+                "{{ {command}; }}; __ec=$?; printf '\\n{CWD_MARKER}%s\\n' \"$PWD\"; exit $__ec"
+            );
+
             let result = tokio::time::timeout(
                 std::time::Duration::from_millis(timeout_ms),
                 tokio::process::Command::new("bash")
                     .arg("-c")
-                    .arg(command)
+                    .arg(&wrapped)
                     .current_dir(&working_dir)
                     .output(),
             )
@@ -108,8 +117,32 @@ impl Tool for BashTool {
 
             match result {
                 Ok(Ok(output)) => {
-                    let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                    let raw_stdout = String::from_utf8_lossy(&output.stdout).to_string();
                     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+                    // Parse and strip the cwd sentinel from stdout.
+                    // The sentinel is always on its own line: "\n__ONE_EXIT_CWD__:<path>\n"
+                    let (mut stdout, new_cwd) =
+                        if let Some(marker_pos) = raw_stdout.find(CWD_MARKER) {
+                            let path_start = marker_pos + CWD_MARKER.len();
+                            let path_end = raw_stdout[path_start..]
+                                .find('\n')
+                                .map(|n| path_start + n)
+                                .unwrap_or(raw_stdout.len());
+                            let captured = raw_stdout[path_start..path_end].to_string();
+                            // Strip the sentinel line (and the preceding \n)
+                            let strip_from = marker_pos.saturating_sub(1);
+                            let clean =
+                                format!("{}{}", &raw_stdout[..strip_from], &raw_stdout[path_end..]);
+                            let cwd = if captured.is_empty() || captured == working_dir {
+                                None
+                            } else {
+                                Some(captured)
+                            };
+                            (clean, cwd)
+                        } else {
+                            (raw_stdout, None)
+                        };
 
                     let mut combined = String::new();
 
@@ -134,12 +167,20 @@ impl Tool for BashTool {
                             "\nExit code: {}",
                             output.status.code().unwrap_or(-1)
                         ));
-                        Ok(ToolResult::error(combined))
+                        Ok(ToolResult {
+                            output: combined,
+                            is_error: true,
+                            new_cwd,
+                        })
                     } else {
                         if combined.is_empty() {
                             combined = "(no output)".to_string();
                         }
-                        Ok(ToolResult::success(combined))
+                        Ok(ToolResult {
+                            output: combined,
+                            is_error: false,
+                            new_cwd,
+                        })
                     }
                 }
                 Ok(Err(e)) => Ok(ToolResult::error(format!("Failed to execute: {e}"))),

@@ -49,15 +49,18 @@ async fn test_full_query_pipeline() {
                         Ok(result) => ToolExecResult {
                             output: result.output,
                             is_error: result.is_error,
+                            new_cwd: result.new_cwd,
                         },
                         Err(e) => ToolExecResult {
                             output: format!("Tool error: {e}"),
                             is_error: true,
+                            new_cwd: None,
                         },
                     },
                     None => ToolExecResult {
                         output: format!("Unknown tool: {name}"),
                         is_error: true,
+                        new_cwd: None,
                     },
                 }
             })

@@ -28,6 +28,8 @@ pub type ToolExecutor = Arc<
 pub struct ToolExecResult {
     pub output: String,
     pub is_error: bool,
+    /// New working directory if the tool changed it (Bash `cd`).
+    pub new_cwd: Option<String>,
 }
 
 pub struct QueryEngine {
@@ -523,12 +525,14 @@ impl QueryEngine {
                             }
                         }
 
-                        // Check permissions for each tool call
-                        let working_dir = {
+                        // Check permissions for each tool call.
+                        // Use session.cwd (not project_path) so that AI-initiated
+                        // `cd` commands are respected across tool turns.
+                        let mut working_dir = {
                             let s = state_clone.read().await;
                             s.sessions
                                 .get(&session_id_owned)
-                                .map(|s| s.project_path.clone())
+                                .map(|s| s.cwd.clone())
                                 .unwrap_or_default()
                         };
 
@@ -1386,10 +1390,12 @@ impl QueryEngine {
                                                 Ok(output) => ToolExecResult {
                                                     output,
                                                     is_error: false,
+                                                    new_cwd: None,
                                                 },
                                                 Err(e) => ToolExecResult {
                                                     output: format!("MCP error: {e}"),
                                                     is_error: true,
+                                                    new_cwd: None,
                                                 },
                                             }
                                         } else {
@@ -1478,6 +1484,19 @@ impl QueryEngine {
                                     // Bash errors cascade to abort siblings
                                     if tc.name == "bash" && result.is_error {
                                         bash_error_cascade = true;
+                                    }
+
+                                    // If the tool changed the working directory
+                                    // (Bash `cd`), persist it to the session and
+                                    // update the local var for subsequent tools.
+                                    if let Some(ref new_cwd) = result.new_cwd {
+                                        working_dir = new_cwd.clone();
+                                        let mut state = state_clone.write().await;
+                                        if let Some(session) =
+                                            state.sessions.get_mut(&session_id_owned)
+                                        {
+                                            session.cwd = new_cwd.clone();
+                                        }
                                     }
 
                                     let _ = event_tx.send(Event::ToolResult {
@@ -1950,10 +1969,12 @@ impl QueryEngine {
                             Ok(output) => ToolExecResult {
                                 output,
                                 is_error: false,
+                                new_cwd: None,
                             },
                             Err(e) => ToolExecResult {
                                 output: format!("MCP error: {e}"),
                                 is_error: true,
+                                new_cwd: None,
                             },
                         }
                     } else {
@@ -1963,6 +1984,7 @@ impl QueryEngine {
                     ToolExecResult {
                         output: "No tool executor configured".to_string(),
                         is_error: true,
+                        new_cwd: None,
                     }
                 };
 

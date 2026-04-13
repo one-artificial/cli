@@ -103,6 +103,8 @@ impl ToolContext {
 pub struct ToolResult {
     pub output: String,
     pub is_error: bool,
+    /// New working directory, if the tool changed it (Bash `cd`).
+    pub new_cwd: Option<String>,
 }
 
 impl ToolResult {
@@ -110,6 +112,7 @@ impl ToolResult {
         Self {
             output: output.into(),
             is_error: false,
+            new_cwd: None,
         }
     }
 
@@ -117,6 +120,7 @@ impl ToolResult {
         Self {
             output: output.into(),
             is_error: true,
+            new_cwd: None,
         }
     }
 }

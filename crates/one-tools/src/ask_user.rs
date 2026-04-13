@@ -102,6 +102,7 @@ impl Tool for AskUserQuestionTool {
             Ok(ToolResult {
                 output: formatted,
                 is_error: false,
+                new_cwd: None,
             })
         })
     }

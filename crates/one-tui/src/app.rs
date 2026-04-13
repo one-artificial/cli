@@ -301,11 +301,41 @@ impl App {
                         ref call_id,
                     } => {
                         self.pet.on_tool_call(tool_name);
+
+                        // Read cwd once for Bash command display normalisation.
+                        let session_cwd = {
+                            let s = self.state.read().await;
+                            s.sessions
+                                .get(session_id)
+                                .map(|s| s.cwd.clone())
+                                .unwrap_or_default()
+                        };
+
                         let detail = match tool_name.as_str() {
                             "Read" => input["file_path"].as_str().unwrap_or("").to_string(),
                             "Write" => input["file_path"].as_str().unwrap_or("").to_string(),
                             "Edit" => input["file_path"].as_str().unwrap_or("").to_string(),
-                            "Bash" => input["command"].as_str().unwrap_or("").to_string(),
+                            "Bash" => {
+                                let cmd = input["command"].as_str().unwrap_or("");
+                                // Strip "cd <cwd> && " prefix — redundant when the
+                                // session is already at that directory.
+                                if !session_cwd.is_empty() {
+                                    let prefixes = [
+                                        format!("cd {} && ", session_cwd),
+                                        format!("cd {}; ", session_cwd),
+                                        format!("cd {}&&", session_cwd),
+                                        format!("cd {}; ", session_cwd),
+                                    ];
+                                    prefixes
+                                        .iter()
+                                        .find_map(|p| cmd.strip_prefix(p.as_str()))
+                                        .map(str::trim)
+                                        .unwrap_or(cmd)
+                                        .to_string()
+                                } else {
+                                    cmd.to_string()
+                                }
+                            }
                             "Grep" => input["pattern"].as_str().unwrap_or("").to_string(),
                             "Glob" => input["pattern"].as_str().unwrap_or("").to_string(),
                             _ => String::new(),
