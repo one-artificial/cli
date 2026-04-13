@@ -3,6 +3,23 @@ use std::path::PathBuf;
 use crate::conversation::Conversation;
 use crate::provider::ModelConfig;
 
+/// Live status for a single sub-agent running on behalf of this session.
+#[derive(Debug, Clone)]
+pub struct AgentStatus {
+    /// Unique ID for this agent run (short hex string).
+    pub id: String,
+    /// Short human-readable label supplied by the AI (3–5 words).
+    pub description: String,
+    /// Number of tool calls executed so far.
+    pub tool_uses: usize,
+    /// Tokens consumed by this agent so far.
+    pub tokens: u64,
+    /// Most recent action taken (e.g. "Read: src/lib.rs").
+    pub last_action: Option<String>,
+    /// True once the agent has returned its result.
+    pub done: bool,
+}
+
 /// A session represents one AI conversation bound to a project directory.
 /// Multiple sessions can be active simultaneously (the "multi-project" feature).
 #[derive(Debug, Clone)]
@@ -40,6 +57,9 @@ pub struct Session {
     /// the system prompt. Populated at session load and updated after each
     /// evergreen pass. Not persisted (rebuilt from the DB on load).
     pub evergreen_context: Option<String>,
+    /// Sub-agents currently running (or recently completed) for this session.
+    /// Populated by AgentStarted/AgentProgress/AgentCompleted events.
+    pub active_agents: Vec<AgentStatus>,
 }
 
 impl Session {
@@ -69,6 +89,7 @@ impl Session {
             branch: String::new(),
             debug_events: Vec::new(),
             evergreen_context: None,
+            active_agents: Vec::new(),
         }
     }
 

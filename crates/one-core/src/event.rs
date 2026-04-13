@@ -85,6 +85,28 @@ pub enum Event {
         session_id: String,
         message: String,
     },
+    /// A sub-agent has started executing.
+    AgentStarted {
+        session_id: String,
+        agent_id: String,
+        description: String,
+    },
+    /// A sub-agent completed a tool call — progress update for the tree view.
+    AgentProgress {
+        session_id: String,
+        agent_id: String,
+        tool_uses: usize,
+        tokens: u64,
+        /// Short description of the most recent action (e.g. "Read: src/lib.rs")
+        last_action: String,
+    },
+    /// A sub-agent finished running.
+    AgentCompleted {
+        session_id: String,
+        agent_id: String,
+        tool_uses: usize,
+        tokens: u64,
+    },
     /// Prelude speculation is ready — Prelude task signals the event loop
     /// with the predicted prompt and speculated response turns.
     PreludeReady {

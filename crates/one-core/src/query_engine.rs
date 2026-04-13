@@ -538,6 +538,93 @@ impl QueryEngine {
                         // Track which indices in tool_results are placeholders for allowed calls
                         let mut allowed_indices = Vec::new();
 
+                        // ── Parallel agent pre-pass ────────────────────────────────────────
+                        // When the AI requests multiple sync Agent calls in one response, run
+                        // them all in parallel before the sequential tool dispatch loop.
+                        // Results are keyed by call_id so the loop below can look them up.
+                        let parallel_agent_results: std::collections::HashMap<String, String> = {
+                            let sync_agents: Vec<_> = response
+                                .tool_calls
+                                .iter()
+                                .filter(|tc| {
+                                    tc.name == "Agent"
+                                        && !tc.input["run_in_background"].as_bool().unwrap_or(false)
+                                })
+                                .collect();
+
+                            if sync_agents.len() > 1 {
+                                let mut handles = Vec::new();
+                                for tc in &sync_agents {
+                                    let pa_agent_id = format!(
+                                        "agent_{}",
+                                        uuid::Uuid::new_v4()
+                                            .to_string()
+                                            .split('-')
+                                            .next()
+                                            .unwrap_or("0")
+                                    );
+                                    let pa_prompt =
+                                        tc.input["prompt"].as_str().unwrap_or("").to_string();
+                                    let pa_desc = tc.input["description"]
+                                        .as_str()
+                                        .unwrap_or("Sub-agent task")
+                                        .to_string();
+                                    let pa_type =
+                                        tc.input["subagent_type"].as_str().map(String::from);
+                                    let pa_model = tc.input["model"].as_str().map(String::from);
+                                    let pa_call_id = tc.id.clone();
+                                    let pa_wd = working_dir.clone();
+                                    let pa_provider = self.provider.clone();
+                                    let pa_config = self.model_config.clone();
+                                    let pa_executor = self.tool_executor.clone();
+                                    let pa_schemas = self.tool_schemas.clone();
+                                    let pa_reg = self.agent_registry.clone();
+                                    let pa_mcp = self.mcp_manager.clone();
+                                    let pa_etx = event_tx.clone();
+                                    let pa_state = self.state.clone();
+                                    let pa_sid = session_id_owned.clone();
+
+                                    handles.push(tokio::spawn(async move {
+                                        let mut eng = QueryEngine::new(
+                                            pa_state,
+                                            pa_provider,
+                                            pa_config,
+                                            pa_etx.clone(),
+                                        );
+                                        eng.tool_schemas = pa_schemas;
+                                        eng.tool_executor = pa_executor;
+                                        eng.agent_registry = pa_reg;
+                                        eng.mcp_manager = pa_mcp;
+                                        let result = eng
+                                            .run_sub_agent(
+                                                &pa_prompt,
+                                                &pa_desc,
+                                                pa_type.as_deref(),
+                                                pa_model.as_deref(),
+                                                None,
+                                                &pa_wd,
+                                                &pa_wd,
+                                                &pa_agent_id,
+                                                &pa_sid,
+                                                &pa_etx,
+                                            )
+                                            .await;
+                                        (pa_call_id, result)
+                                    }));
+                                }
+                                let mut map = std::collections::HashMap::new();
+                                for h in handles {
+                                    if let Ok((id, res)) = h.await {
+                                        map.insert(id, res);
+                                    }
+                                }
+                                map
+                            } else {
+                                std::collections::HashMap::new()
+                            }
+                        };
+                        // ──────────────────────────────────────────────────────────────────
+
                         for tool_call in &response.tool_calls {
                             // Intercept Agent tool calls — run sub-agent directly
                             if tool_call.name == "Agent" {
@@ -620,6 +707,9 @@ impl QueryEngine {
                                                 None, // background agents don't support fork
                                                 &bg_wd,
                                                 &bg_wd,
+                                                &bg_agent_id,
+                                                "", // background agents have no parent session
+                                                &bg_event_tx,
                                             )
                                             .await;
 
@@ -663,6 +753,22 @@ impl QueryEngine {
                                         "content": msg,
                                         "is_error": false,
                                     }));
+                                } else if let Some(parallel_result) =
+                                    parallel_agent_results.get(&tool_call.id)
+                                {
+                                    // This agent was already run in the parallel pre-pass.
+                                    let _ = event_tx.send(Event::ToolResult {
+                                        session_id: session_id_owned.clone(),
+                                        call_id: tool_call.id.clone(),
+                                        output: parallel_result.clone(),
+                                        is_error: false,
+                                    });
+                                    tool_results.push(serde_json::json!({
+                                        "type": "tool_result",
+                                        "tool_use_id": tool_call.id,
+                                        "content": parallel_result,
+                                        "is_error": false,
+                                    }));
                                 } else {
                                     // Sync agent: optionally with worktree isolation
                                     let use_worktree =
@@ -698,6 +804,14 @@ impl QueryEngine {
                                         (working_dir.clone(), None)
                                     };
 
+                                    let sync_agent_id = format!(
+                                        "agent_{}",
+                                        uuid::Uuid::new_v4()
+                                            .to_string()
+                                            .split('-')
+                                            .next()
+                                            .unwrap_or("0")
+                                    );
                                     let result = self
                                         .run_sub_agent(
                                             prompt,
@@ -707,6 +821,9 @@ impl QueryEngine {
                                             fork_msgs.as_deref(),
                                             &working_dir,
                                             &agent_wd,
+                                            &sync_agent_id,
+                                            &session_id_owned,
+                                            &event_tx,
                                         )
                                         .await;
 
@@ -1589,6 +1706,9 @@ impl QueryEngine {
         fork_messages: Option<&[Message]>,
         _project_path: &str,
         working_dir: &str,
+        agent_id: &str,
+        parent_session_id: &str,
+        event_tx: &tokio::sync::broadcast::Sender<Event>,
     ) -> String {
         const MAX_AGENT_TURNS: usize = 50;
 
@@ -1699,17 +1819,40 @@ impl QueryEngine {
             agent_config.model
         );
 
+        let _ = event_tx.send(Event::AgentStarted {
+            session_id: parent_session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            description: description.to_string(),
+        });
+
+        let mut total_tool_uses: usize = 0;
+        let mut total_tokens: u64 = 0;
+
         // Mini tool execution loop
         for _turn in 0..MAX_AGENT_TURNS {
             let response = match self.provider.send_message(&messages, &agent_config).await {
                 Ok(r) => r,
                 Err(e) => {
+                    let _ = event_tx.send(Event::AgentCompleted {
+                        session_id: parent_session_id.to_string(),
+                        agent_id: agent_id.to_string(),
+                        tool_uses: total_tool_uses,
+                        tokens: total_tokens,
+                    });
                     return format!("Sub-agent error: {e}");
                 }
             };
 
+            total_tokens += response.usage.output_tokens as u64;
+
             // No tool calls → return the text response
             if response.tool_calls.is_empty() {
+                let _ = event_tx.send(Event::AgentCompleted {
+                    session_id: parent_session_id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    tool_uses: total_tool_uses,
+                    tokens: total_tokens,
+                });
                 return response.content;
             }
 
@@ -1762,6 +1905,25 @@ impl QueryEngine {
                     "content": result.output,
                     "is_error": result.is_error,
                 }));
+
+                total_tool_uses += 1;
+                let last_action = format!(
+                    "{}: {}",
+                    tc.name,
+                    crate::permissions::PermissionEngine::extract_input_context(
+                        &tc.name, &tc.input
+                    )
+                    .chars()
+                    .take(60)
+                    .collect::<String>()
+                );
+                let _ = event_tx.send(Event::AgentProgress {
+                    session_id: parent_session_id.to_string(),
+                    agent_id: agent_id.to_string(),
+                    tool_uses: total_tool_uses,
+                    tokens: total_tokens,
+                    last_action,
+                });
             }
 
             // Append messages for next turn
@@ -1775,6 +1937,12 @@ impl QueryEngine {
             });
         }
 
+        let _ = event_tx.send(Event::AgentCompleted {
+            session_id: parent_session_id.to_string(),
+            agent_id: agent_id.to_string(),
+            tool_uses: total_tool_uses,
+            tokens: total_tokens,
+        });
         "Sub-agent reached maximum turn limit.".to_string()
     }
 }

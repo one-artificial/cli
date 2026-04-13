@@ -406,3 +406,125 @@ pub fn status_active(
         ]),
     ]
 }
+
+// ── Agent tree ────────────────────────────────────────────────────────────────
+
+/// Render the parallel-agent tree shown while sub-agents are running.
+///
+/// ```text
+/// ⏺ Running 3 agents…
+///    ├─ Explore codebase · 4 tool uses · 12.3k tokens
+///    │  ⎿  Read: src/lib.rs
+///    ├─ Find tests · 2 tool uses · 8.1k tokens
+///    │  ⎿  Glob: **/*.test.rs
+///    └─ Check CI · 1 tool use · 6.2k tokens
+///       ⎿  Initializing…
+/// ```
+pub fn agent_tree(agents: &[one_core::session::AgentStatus]) -> Vec<Line<'static>> {
+    if agents.is_empty() {
+        return Vec::new();
+    }
+
+    let running = agents.iter().filter(|a| !a.done).count();
+    let total = agents.len();
+
+    let header_text = if running == 0 {
+        let total_tools: usize = agents.iter().map(|a| a.tool_uses).sum();
+        let total_tokens: u64 = agents.iter().map(|a| a.tokens).sum();
+        format!(
+            "{} agent{} complete \u{00b7} {} tool use{} \u{00b7} {}",
+            total,
+            if total == 1 { "" } else { "s" },
+            total_tools,
+            if total_tools == 1 { "" } else { "s" },
+            format_k(total_tokens),
+        )
+    } else {
+        format!(
+            "Running {} agent{}\u{2026}",
+            running,
+            if running == 1 { "" } else { "s" }
+        )
+    };
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            STATIC_DOT.to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            header_text,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    for (i, agent) in agents.iter().enumerate() {
+        let is_last = i == agents.len() - 1;
+        let branch = if is_last {
+            "   \u{2514}\u{2500} "
+        } else {
+            "   \u{251c}\u{2500} "
+        };
+        let pipe = if is_last { "      " } else { "   \u{2502}  " };
+
+        // Metric suffix
+        let token_str = format_k(agent.tokens);
+        let uses_str = if agent.tool_uses == 1 {
+            "1 tool use".to_string()
+        } else {
+            format!("{} tool uses", agent.tool_uses)
+        };
+        let metrics = format!(" \u{00b7} {} \u{00b7} {}", uses_str, token_str);
+
+        let name_color = if agent.done {
+            Color::DarkGray
+        } else {
+            Color::White
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(branch.to_string(), Style::default().fg(Color::DarkGray)),
+            Span::styled(agent.description.clone(), Style::default().fg(name_color)),
+            Span::styled(metrics, Style::default().fg(Color::DarkGray)),
+        ]));
+
+        let action = agent
+            .last_action
+            .as_deref()
+            .unwrap_or("Initializing\u{2026}");
+        let action_text: String = action.chars().take(80).collect();
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{pipe}{OUTPUT_PREFIX}"),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ),
+            Span::styled(
+                action_text,
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::DIM),
+            ),
+        ]));
+    }
+
+    lines
+}
+
+fn format_k(n: u64) -> String {
+    if n == 0 {
+        "0 tokens".to_string()
+    } else if n < 1_000 {
+        format!("{n} tokens")
+    } else {
+        format!("{:.1}k tokens", n as f64 / 1_000.0)
+    }
+}

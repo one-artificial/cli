@@ -274,6 +274,13 @@ impl App {
                                     }
                                 }
                             }
+                            // Clear completed agents now that the parent response is in.
+                            {
+                                let mut state = self.state.write().await;
+                                if let Some(session) = state.sessions.get_mut(session_id) {
+                                    session.active_agents.retain(|a| !a.done);
+                                }
+                            }
                         } else {
                             self.pet.on_response_start();
                             self.is_between_tools = false;
@@ -437,6 +444,56 @@ impl App {
                         ref project,
                     } => {
                         self.tabs.add_session(project.clone(), session_id.clone());
+                    }
+                    Event::AgentStarted {
+                        ref session_id,
+                        ref agent_id,
+                        ref description,
+                    } => {
+                        let mut state = self.state.write().await;
+                        if let Some(session) = state.sessions.get_mut(session_id) {
+                            session.active_agents.push(one_core::session::AgentStatus {
+                                id: agent_id.clone(),
+                                description: description.clone(),
+                                tool_uses: 0,
+                                tokens: 0,
+                                last_action: None,
+                                done: false,
+                            });
+                        }
+                    }
+                    Event::AgentProgress {
+                        ref session_id,
+                        ref agent_id,
+                        tool_uses,
+                        tokens,
+                        ref last_action,
+                    } => {
+                        let mut state = self.state.write().await;
+                        if let Some(session) = state.sessions.get_mut(session_id)
+                            && let Some(ag) =
+                                session.active_agents.iter_mut().find(|a| a.id == *agent_id)
+                        {
+                            ag.tool_uses = tool_uses;
+                            ag.tokens = tokens;
+                            ag.last_action = Some(last_action.clone());
+                        }
+                    }
+                    Event::AgentCompleted {
+                        ref session_id,
+                        ref agent_id,
+                        tool_uses,
+                        tokens,
+                    } => {
+                        let mut state = self.state.write().await;
+                        if let Some(session) = state.sessions.get_mut(session_id)
+                            && let Some(ag) =
+                                session.active_agents.iter_mut().find(|a| a.id == *agent_id)
+                        {
+                            ag.tool_uses = tool_uses;
+                            ag.tokens = tokens;
+                            ag.done = true;
+                        }
                     }
                     Event::PermissionPrompt {
                         tool_name,
@@ -2598,6 +2655,13 @@ impl App {
                             dot_color,
                         ));
                     }
+                    result.push(Line::from(""));
+                }
+
+                // Agent tree — shown whenever sub-agents are active or just completed
+                if !session.active_agents.is_empty() {
+                    result.push(Line::from(""));
+                    result.extend(crate::render::agent_tree(&session.active_agents));
                     result.push(Line::from(""));
                 }
 
