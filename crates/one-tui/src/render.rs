@@ -412,7 +412,7 @@ pub fn status_active(
 /// Render the parallel-agent tree shown while sub-agents are running.
 ///
 /// ```text
-/// ⏺ Running 3 agents…
+/// ⏺ Running 3 agents…  (Ctrl+\ to collapse)
 ///    ├─ Explore codebase · 4 tool uses · 12.3k tokens
 ///    │  ⎿  Read: src/lib.rs
 ///    ├─ Find tests · 2 tool uses · 8.1k tokens
@@ -420,7 +420,10 @@ pub fn status_active(
 ///    └─ Check CI · 1 tool use · 6.2k tokens
 ///       ⎿  Initializing…
 /// ```
-pub fn agent_tree(agents: &[one_core::session::AgentStatus]) -> Vec<Line<'static>> {
+pub fn agent_tree(
+    agents: &[one_core::session::AgentStatus],
+    collapsed: bool,
+) -> Vec<Line<'static>> {
     if agents.is_empty() {
         return Vec::new();
     }
@@ -439,9 +442,15 @@ pub fn agent_tree(agents: &[one_core::session::AgentStatus]) -> Vec<Line<'static
             if total_tools == 1 { "" } else { "s" },
             format_k(total_tokens),
         )
+    } else if collapsed {
+        format!(
+            "Running {} agent{}\u{2026}  (Ctrl+\\ to expand)",
+            running,
+            if running == 1 { "" } else { "s" }
+        )
     } else {
         format!(
-            "Running {} agent{}\u{2026}",
+            "Running {} agent{}\u{2026}  (Ctrl+\\ to collapse)",
             running,
             if running == 1 { "" } else { "s" }
         )
@@ -463,6 +472,11 @@ pub fn agent_tree(agents: &[one_core::session::AgentStatus]) -> Vec<Line<'static
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
+
+    // Collapsed: only show the header line
+    if collapsed {
+        return lines;
+    }
 
     for (i, agent) in agents.iter().enumerate() {
         let is_last = i == agents.len() - 1;

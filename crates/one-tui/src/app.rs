@@ -86,6 +86,8 @@ pub struct App {
     import_picker: Option<ImportPickerState>,
     /// User-configurable keybindings (loaded from ~/.one/keybindings.json)
     keybindings: one_core::keybindings::KeybindingConfig,
+    /// Whether the agent tree panel is collapsed (Ctrl+\ toggles)
+    agents_collapsed: bool,
     /// Spinner animation tick (cycles through frames)
     spinner_tick: u8,
     /// When the current stream started (for elapsed time display)
@@ -137,6 +139,7 @@ impl App {
             provider_picker: None,
             import_picker: None,
             keybindings: one_core::keybindings::KeybindingConfig::load(),
+            agents_collapsed: false,
             spinner_tick: 0,
             stream_started: None,
             tool_exec_started: None,
@@ -179,10 +182,7 @@ impl App {
         crossterm::execute!(
             stdout,
             EnterAlternateScreen,
-            PushKeyboardEnhancementFlags(
-                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
-            )
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend)?;
@@ -1020,6 +1020,10 @@ impl App {
                             }
                             (KeyModifiers::CONTROL, KeyCode::Char('e')) => {
                                 self.input.move_to_end();
+                            }
+                            // Ctrl+\: collapse/expand the agent tree panel
+                            (KeyModifiers::CONTROL, KeyCode::Char('\\')) => {
+                                self.agents_collapsed = !self.agents_collapsed;
                             }
                             // Alt+Backspace: delete word backward
                             (KeyModifiers::ALT, KeyCode::Backspace) => {
@@ -2661,7 +2665,10 @@ impl App {
                 // Agent tree — shown whenever sub-agents are active or just completed
                 if !session.active_agents.is_empty() {
                     result.push(Line::from(""));
-                    result.extend(crate::render::agent_tree(&session.active_agents));
+                    result.extend(crate::render::agent_tree(
+                        &session.active_agents,
+                        self.agents_collapsed,
+                    ));
                     result.push(Line::from(""));
                 }
 
@@ -2955,7 +2962,15 @@ impl App {
             ]),
             Line::from(vec![
                 Span::styled("  Ctrl+O       ", key_style),
-                Span::styled("Open transcript", dim),
+                Span::styled("Expanded view (no input)", dim),
+            ]),
+            Line::from(vec![
+                Span::styled("  Ctrl+E       ", key_style),
+                Span::styled("Verbose full history (in expanded view)", dim),
+            ]),
+            Line::from(vec![
+                Span::styled("  Ctrl+\\      ", key_style),
+                Span::styled("Collapse/expand agent tree", dim),
             ]),
             Line::from(vec![
                 Span::styled("  Ctrl+T       ", key_style),

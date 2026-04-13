@@ -675,7 +675,7 @@ impl QueryEngine {
                                     let bg_agent_reg = self.agent_registry.clone();
                                     let bg_mcp = self.mcp_manager.clone();
                                     let bg_event_tx = event_tx.clone();
-                                    let _bg_sid = session_id_owned.clone();
+                                    let bg_sid = session_id_owned.clone();
                                     let bg_agent_id = agent_id.clone();
 
                                     let _ = event_tx.send(Event::DebugLog {
@@ -708,7 +708,7 @@ impl QueryEngine {
                                                 &bg_wd,
                                                 &bg_wd,
                                                 &bg_agent_id,
-                                                "", // background agents have no parent session
+                                                &bg_sid,
                                                 &bg_event_tx,
                                             )
                                             .await;
@@ -1843,7 +1843,7 @@ impl QueryEngine {
                 }
             };
 
-            total_tokens += response.usage.output_tokens as u64;
+            total_tokens += (response.usage.input_tokens + response.usage.output_tokens) as u64;
 
             // No tool calls → return the text response
             if response.tool_calls.is_empty() {
