@@ -1006,12 +1006,10 @@ impl QueryEngine {
                                         warning: decision.warning.clone(),
                                     });
 
-                                    // Wait for user response (with timeout)
-                                    let response = tokio::time::timeout(
-                                        std::time::Duration::from_secs(120),
-                                        resp_rx,
-                                    )
-                                    .await;
+                                    // Wait indefinitely — this is a human gate.
+                                    // The task parks here until the user responds;
+                                    // closing the laptop and reopening it later is fine.
+                                    let response = resp_rx.await;
 
                                     // Clear pending state
                                     {
@@ -1019,11 +1017,8 @@ impl QueryEngine {
                                         let _ = s.pending_permission.lock().unwrap().take();
                                     }
 
-                                    // Resolve the response
-                                    let user_decision = match response {
-                                        Ok(Ok(r)) => Some(r),
-                                        _ => None, // Timeout or channel error
-                                    };
+                                    // Resolve the response (None if channel closed at shutdown)
+                                    let user_decision = response.ok();
 
                                     match user_decision {
                                         Some(crate::event::PermissionResponse::Allow) => {
@@ -1097,9 +1092,9 @@ impl QueryEngine {
                                             }));
                                         }
                                         None => {
-                                            // Timeout or channel error — treat as deny
+                                            // Channel closed without response — treat as deny
                                             let deny_msg =
-                                                "Tool use timed out waiting for approval"
+                                                "Tool use denied: permission channel closed"
                                                     .to_string();
                                             tool_results.push(serde_json::json!({
                                                 "type": "tool_result",
