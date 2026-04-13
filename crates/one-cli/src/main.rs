@@ -1069,8 +1069,94 @@ async fn main() -> Result<()> {
         let state_persist = state.clone();
 
         tokio::spawn(async move {
+            // Buffers ToolRequest until its paired ToolResult arrives so we can
+            // record both input and timing in a single tool_calls row.
+            let mut pending_tools: std::collections::HashMap<
+                String,
+                (String, String, String, std::time::Instant),
+            > = std::collections::HashMap::new();
+
             loop {
                 match persist_rx.recv().await {
+                    Ok(Event::SessionCreated { ref session_id, .. }) => {
+                        let s = state_persist.read().await;
+                        if let Some(session) = s.sessions.get(session_id)
+                            && !session.db_path.as_os_str().is_empty()
+                        {
+                            let db_path_w = session.db_path.clone();
+                            let meta = one_db::session_db::SessionMeta {
+                                session_id: session.session_hash.clone(),
+                                project_path: session.project_path.clone(),
+                                branch: session.branch.clone(),
+                                tab_name: None,
+                                provider: session.model_config.provider.to_string(),
+                                model: session.model_config.model.clone(),
+                                effort: session.effort.clone(),
+                                cwd: session.cwd.clone(),
+                                cost_usd: 0.0,
+                                input_tokens: 0,
+                                output_tokens: 0,
+                                created_at: session.created_at.to_rfc3339(),
+                                last_active_at: session.created_at.to_rfc3339(),
+                                imported_from: None,
+                            };
+                            tokio::task::spawn_blocking(move || {
+                                if let Ok(db) = one_db::SessionDb::open(&db_path_w) {
+                                    let _ = db.save_session_meta(&meta);
+                                }
+                            });
+                        }
+                    }
+
+                    Ok(Event::ToolRequest {
+                        ref call_id,
+                        ref session_id,
+                        ref tool_name,
+                        ref input,
+                    }) => {
+                        pending_tools.insert(
+                            call_id.clone(),
+                            (
+                                session_id.clone(),
+                                tool_name.clone(),
+                                input.to_string(),
+                                std::time::Instant::now(),
+                            ),
+                        );
+                    }
+
+                    Ok(Event::ToolResult {
+                        ref call_id,
+                        ref output,
+                        is_error,
+                        ..
+                    }) => {
+                        if let Some((sid, tool_name, input_json, start)) =
+                            pending_tools.remove(call_id)
+                        {
+                            let duration_ms = start.elapsed().as_millis() as i64;
+                            let s = state_persist.read().await;
+                            if let Some(session) = s.sessions.get(&sid)
+                                && !session.db_path.as_os_str().is_empty()
+                            {
+                                let db_path_w = session.db_path.clone();
+                                let output_w = output.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    if let Ok(db) = one_db::SessionDb::open(&db_path_w) {
+                                        let _ = db.save_tool_call(
+                                            None,
+                                            &tool_name,
+                                            &input_json,
+                                            Some(&output_w),
+                                            is_error,
+                                            Some(duration_ms),
+                                        );
+                                    }
+                                });
+                            }
+                        }
+                    }
+
                     Ok(Event::UserMessage {
                         session_id,
                         content,

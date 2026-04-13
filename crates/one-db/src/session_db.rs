@@ -96,17 +96,20 @@ impl SessionDb {
     }
 
     fn migrate(&self) -> Result<()> {
-        // Schema version gate — nuke evergreen_chunks when schema is outdated.
-        // No backwards compatibility: old chunk records are dropped and rebuilt
-        // by the next Evergreen pass.
-        const SCHEMA_VERSION: i64 = 2;
+        // Schema version gate — nuke tables that changed shape between versions.
+        // No backwards compatibility: evergreen_chunks are dropped and rebuilt
+        // by the next Evergreen pass. jsonl_turns was removed in v3.
+        const SCHEMA_VERSION: i64 = 3;
         let version: i64 = self
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap_or(0);
         if version < SCHEMA_VERSION {
-            self.conn
-                .execute_batch("DROP TABLE IF EXISTS evergreen_chunks;")?;
+            self.conn.execute_batch(
+                "DROP TABLE IF EXISTS evergreen_chunks;
+                 DROP TABLE IF EXISTS jsonl_turns;
+                 DROP TABLE IF EXISTS tool_calls;",
+            )?;
         }
 
         self.conn.execute_batch(
@@ -123,7 +126,7 @@ impl SessionDb {
             -- Tool executions linked to an assistant message
             CREATE TABLE IF NOT EXISTS tool_calls (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                message_id  INTEGER NOT NULL REFERENCES messages(id),
+                message_id  INTEGER REFERENCES messages(id),
                 tool_name   TEXT    NOT NULL,
                 input_json  TEXT    NOT NULL,
                 output      TEXT,
@@ -140,37 +143,22 @@ impl SessionDb {
                 value TEXT NOT NULL
             );
 
-            -- Compressed context spans (schema v2 — structured fields for symbolic retrieval)
+            -- Compressed context spans (schema v3)
             CREATE TABLE IF NOT EXISTS evergreen_chunks (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                span_start_id   INTEGER NOT NULL,
-                span_end_id     INTEGER NOT NULL,
-                tier            TEXT    NOT NULL DEFAULT 'hot',
-                -- Full summary text (for display and BM25 indexing)
-                summary         TEXT    NOT NULL,
-                -- Parsed structured fields
-                goal            TEXT,
-                state_text      TEXT,
-                approach        TEXT,
-                fingerprint     TEXT,
-                artefacts_json  TEXT    NOT NULL DEFAULT '[]',
-                errors_json     TEXT    NOT NULL DEFAULT '[]',
-                open_json       TEXT    NOT NULL DEFAULT '[]',
-                decided_json    TEXT    NOT NULL DEFAULT '[]',
-                constraints_json TEXT   NOT NULL DEFAULT '[]',
-                sharp_edges_json TEXT   NOT NULL DEFAULT '[]',
-                recall_note     TEXT,
-                resolved        TEXT,
-                vital_refs      TEXT,
-                created_at      TEXT    NOT NULL
-            );
-
-            -- Raw JSONL lines preserved for lossless import/export round-trips
-            CREATE TABLE IF NOT EXISTS jsonl_turns (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                message_id INTEGER REFERENCES messages(id),
-                jsonl_line TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                span_start_id    INTEGER NOT NULL,
+                span_end_id      INTEGER NOT NULL,
+                tier             TEXT    NOT NULL DEFAULT 'hot',
+                summary          TEXT    NOT NULL,
+                goal             TEXT,
+                artefacts_json   TEXT    NOT NULL DEFAULT '[]',
+                errors_json      TEXT    NOT NULL DEFAULT '[]',
+                open_json        TEXT    NOT NULL DEFAULT '[]',
+                decided_json     TEXT    NOT NULL DEFAULT '[]',
+                constraints_json TEXT    NOT NULL DEFAULT '[]',
+                sharp_edges_json TEXT    NOT NULL DEFAULT '[]',
+                recall_note      TEXT,
+                created_at       TEXT    NOT NULL
             );
             ",
         )?;
@@ -310,7 +298,7 @@ impl SessionDb {
 impl SessionDb {
     pub fn save_tool_call(
         &self,
-        message_id: i64,
+        message_id: Option<i64>,
         tool_name: &str,
         input_json: &str,
         output: Option<&str>,
@@ -524,30 +512,6 @@ impl SessionDb {
     }
 }
 
-// ── JSONL (import / export) ───────────────────────────────────────────────────
-
-impl SessionDb {
-    pub fn save_jsonl_turn(&self, message_id: Option<i64>, jsonl_line: &str) -> Result<()> {
-        let now = chrono::Utc::now().to_rfc3339();
-        self.conn.execute(
-            "INSERT INTO jsonl_turns (message_id, jsonl_line, created_at)
-             VALUES (?1, ?2, ?3)",
-            params![message_id, jsonl_line, now],
-        )?;
-        Ok(())
-    }
-
-    pub fn load_jsonl_turns(&self) -> Result<Vec<String>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT jsonl_line FROM jsonl_turns ORDER BY id ASC")?;
-        let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(rows)
-    }
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -628,7 +592,7 @@ mod tests {
             .save_message("assistant", "", "2026-04-11T10:00:00Z", None)
             .unwrap();
         db.save_tool_call(
-            msg_id,
+            Some(msg_id),
             "Bash",
             r#"{"cmd":"ls"}"#,
             Some("file.rs"),
