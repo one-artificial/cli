@@ -70,6 +70,13 @@ impl Tool for AgentTool {
                     "description": "Fork mode: agent inherits the parent conversation as context. \
                                     Use when the agent needs full awareness of what happened so far. \
                                     Default: false (fresh context)."
+                },
+                "depends_on": {
+                    "type": "string",
+                    "description": "Optional call ID of another Agent tool call in this response \
+                                    that must complete before this agent starts. Use when this agent \
+                                    needs the output of a sibling agent as context. Ignored for \
+                                    background agents."
                 }
             },
             "required": ["prompt", "description"]

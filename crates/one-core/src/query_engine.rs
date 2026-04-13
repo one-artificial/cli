@@ -542,6 +542,11 @@ impl QueryEngine {
                         // When the AI requests multiple sync Agent calls in one response, run
                         // them all in parallel before the sequential tool dispatch loop.
                         // Results are keyed by call_id so the loop below can look them up.
+                        //
+                        // Dependency ordering: each Agent call may declare `depends_on: <call_id>`.
+                        // Dependent agents wait on a per-agent Arc<Semaphore(0)> that is closed
+                        // (unblocking all current and future waiters) when the upstream agent
+                        // finishes. Cycles are broken by position — lower index = "older" = wins.
                         let parallel_agent_results: std::collections::HashMap<String, String> = {
                             let sync_agents: Vec<_> = response
                                 .tool_calls
@@ -553,8 +558,57 @@ impl QueryEngine {
                                 .collect();
 
                             if sync_agents.len() > 1 {
+                                // Build call_id → index map for dependency resolution.
+                                let id_to_idx: std::collections::HashMap<&str, usize> = sync_agents
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, tc)| (tc.id.as_str(), i))
+                                    .collect();
+
+                                // Parse raw depends_on, resolve to indices.
+                                let mut deps: Vec<Option<usize>> = sync_agents
+                                    .iter()
+                                    .map(|tc| {
+                                        tc.input["depends_on"]
+                                            .as_str()
+                                            .and_then(|id| id_to_idx.get(id).copied())
+                                    })
+                                    .collect();
+
+                                // Cycle detection: follow each node's chain; if we reach the
+                                // origin again, cut that edge (lower index = older = wins).
+                                for i in 0..sync_agents.len() {
+                                    if let Some(dep) = deps[i] {
+                                        let mut cur = dep;
+                                        let mut visited = std::collections::HashSet::new();
+                                        loop {
+                                            if cur == i {
+                                                deps[i] = None; // break cycle
+                                                break;
+                                            }
+                                            if !visited.insert(cur) {
+                                                break; // no cycle involving i
+                                            }
+                                            match deps[cur] {
+                                                Some(next) => cur = next,
+                                                None => break,
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // One semaphore per agent, starts closed=0 (blocks).
+                                // Closed when that agent finishes — unblocks dependents.
+                                let completion_sems: Vec<Arc<tokio::sync::Semaphore>> = (0
+                                    ..sync_agents.len())
+                                    .map(|_| Arc::new(tokio::sync::Semaphore::new(0)))
+                                    .collect();
+
                                 let mut handles = Vec::new();
-                                for tc in &sync_agents {
+                                for (i, tc) in sync_agents.iter().enumerate() {
+                                    let dep_sem = deps[i].map(|j| completion_sems[j].clone());
+                                    let my_sem = completion_sems[i].clone();
+
                                     let pa_agent_id = format!(
                                         "agent_{}",
                                         uuid::Uuid::new_v4()
@@ -585,6 +639,13 @@ impl QueryEngine {
                                     let pa_sid = session_id_owned.clone();
 
                                     handles.push(tokio::spawn(async move {
+                                        // Wait for declared dependency to finish.
+                                        // acquire() returns Err when the semaphore is
+                                        // closed — that IS the "done" signal.
+                                        if let Some(dep) = dep_sem {
+                                            let _ = dep.acquire().await;
+                                        }
+
                                         let mut eng = QueryEngine::new(
                                             pa_state,
                                             pa_provider,
@@ -609,6 +670,12 @@ impl QueryEngine {
                                                 &pa_etx,
                                             )
                                             .await;
+
+                                        // Signal completion — unblocks any dependents.
+                                        // close() is persistent: late .acquire() calls
+                                        // also return immediately.
+                                        my_sem.close();
+
                                         (pa_call_id, result)
                                     }));
                                 }
